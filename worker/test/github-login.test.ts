@@ -20,9 +20,11 @@ function callback(flow: Awaited<ReturnType<typeof start>>, query = "", headers: 
 function tokenResponse(tokenType = "bearer") {
   return Response.json({ access_token: "gho_fixture_secret", token_type: tokenType, scope: "" });
 }
-async function expectFailure(response: Response, status: number, code: string) {
+async function expectFailure(response: Response, status: number, code: string, step: "token" | "profile" = "token", upstreamStatus?: number) {
   expect(response.status).toBe(status); expect(await response.json()).toEqual({ code });
   expect(response.headers.get("X-SpiderWatch-Auth-Error")).toBe(code);
+  expect(response.headers.get("X-SpiderWatch-Auth-Step")).toBe(step);
+  expect(response.headers.get("X-SpiderWatch-GitHub-Status")).toBe(upstreamStatus === undefined ? null : String(upstreamStatus));
   expect(response.headers.get("Cache-Control")).toBe("no-store");
   const cookies = response.headers.getSetCookie();
   expect(cookies.some(value => value.startsWith(flowName + "=;") && value.includes("Max-Age=0"))).toBe(true);
@@ -30,7 +32,7 @@ async function expectFailure(response: Response, status: number, code: string) {
 }
 function mockGithub(user: Record<string, unknown> = { id: 12345, login: "owner", type: "User" }, tokenType = "bearer") {
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
-    expect(init?.redirect).toBe("error"); expect(init?.signal).toBeInstanceOf(AbortSignal);
+    expect(init?.redirect).toBe("manual"); expect(init?.signal).toBeInstanceOf(AbortSignal);
     if (String(input) === "https://github.com/login/oauth/access_token") return tokenResponse(tokenType);
     expect(String(input)).toBe("https://api.github.com/user");
     expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer gho_fixture_secret");
@@ -151,10 +153,13 @@ it.each([
   vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(Response.json({ error, error_description: description }));
   const response = await worker.fetch(callback(flow, "", { Accept: "text/html" }), config), html = await response.text();
   expect(response.status).toBe(status); expect(response.headers.get("X-SpiderWatch-Auth-Error")).toBe(code);
+  expect(response.headers.get("X-SpiderWatch-Auth-Step")).toBe("token");
+  expect(response.headers.get("X-SpiderWatch-GitHub-Status")).toBeNull();
   expect(response.headers.get("Content-Type")).toContain("text/html");
   expect(response.headers.get("Content-Security-Policy")).toContain("default-src 'none'");
   expect(response.headers.get("Referrer-Policy")).toBe("no-referrer");
   expect(html).toContain(`<h1>${title}</h1>`); expect(html).toContain('href="/panel/auth/login">重新登录</a>');
+  expect(html).toContain("<small>授权交换</small>");
   expect(html).not.toContain("登录尚未配置"); expect(html).not.toContain("不在管理员名单");
   for (const privateValue of ["provider-description-secret", "<script>", config.GITHUB_CLIENT_SECRET, flow.cookie]) {
     expect(html).not.toContain(privateValue); expect(JSON.stringify(warning.mock.calls)).not.toContain(privateValue);
@@ -164,10 +169,10 @@ it.each([
 it("rejects HTTP errors, redirects, malformed or oversized replies without logging their contents", async () => {
   noStorage(); const flow = await start(), remote = vi.spyOn(globalThis, "fetch");
   const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
-  const cases: [Response, string][] = [
-    [new Response("gho_private_response", { status: 503 }), "github_connection_failed"],
+  const cases: [Response, string, number?][] = [
+    [new Response("gho_private_response", { status: 503 }), "github_http_error", 503],
     [Response.json({ message: "gho_private_response" }, { status: 503 }), "github_token_exchange_failed"],
-    [Response.redirect("https://evil.example"), "github_response_invalid"],
+    [Response.redirect("https://evil.example"), "github_redirect_rejected", 302],
     [new Response("not-json"), "github_response_invalid"],
     [Response.json(null), "github_response_invalid"], [Response.json([]), "github_response_invalid"],
     [Response.json({ access_token: "bad\r\nheader", token_type: "bearer" }), "github_response_invalid"],
@@ -175,10 +180,11 @@ it("rejects HTTP errors, redirects, malformed or oversized replies without loggi
     [new Response("x".repeat(32769)), "github_response_invalid"],
     [new Response("{}", { headers: { "Content-Length": "32769" } }), "github_response_invalid"],
   ];
-  for (const [upstream, code] of cases) {
+  for (const [upstream, code, upstreamStatus] of cases) {
     remote.mockResolvedValueOnce(upstream);
-    await expectFailure(await worker.fetch(callback(flow), githubSettings()), 502, code);
-    expect(warning).toHaveBeenLastCalledWith(JSON.stringify({ event: "github_login_failed", stage: "token", code, status: 502 }));
+    await expectFailure(await worker.fetch(callback(flow), githubSettings()), 502, code, "token", upstreamStatus);
+    expect(warning).toHaveBeenLastCalledWith(JSON.stringify({ event: "github_login_failed", stage: "token", code, status: 502,
+      ...(upstreamStatus ? { upstream_status: upstreamStatus } : {}) }));
   }
   expect(JSON.stringify(warning.mock.calls)).not.toContain("gho_private_response");
   expect(remote).toHaveBeenCalledTimes(cases.length);
@@ -193,7 +199,7 @@ it.each([
 ] as const)("classifies profile HTTP %i and invalid identities", async (upstreamStatus, profile, code) => {
   noStorage(); const flow = await start(), warning = vi.spyOn(console, "warn").mockImplementation(() => {});
   const remote = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(tokenResponse()).mockResolvedValueOnce(Response.json(profile, { status: upstreamStatus }));
-  await expectFailure(await worker.fetch(callback(flow), githubSettings()), 502, code);
+  await expectFailure(await worker.fetch(callback(flow), githubSettings()), 502, code, "profile");
   expect(warning.mock.calls).toEqual([[JSON.stringify({ event: "github_login_failed", stage: "profile", code, status: 502 })]]);
   expect(remote).toHaveBeenCalledTimes(2);
 });
@@ -207,7 +213,7 @@ it.each([
   const remote = vi.spyOn(globalThis, "fetch");
   if (stage === "profile") remote.mockResolvedValueOnce(tokenResponse());
   remote.mockResolvedValueOnce(new Response(status === 429 ? null : "upstream-rate-limit-secret", { status, headers }));
-  await expectFailure(await worker.fetch(callback(flow), githubSettings()), 429, "github_rate_limited");
+  await expectFailure(await worker.fetch(callback(flow), githubSettings()), 429, "github_rate_limited", stage);
   expect(warning.mock.calls).toEqual([[JSON.stringify({ event: "github_login_failed", stage, code: "github_rate_limited", status: 429 })]]);
 });
 
@@ -218,7 +224,7 @@ it.each(["token", "profile"] as const)("sanitizes fetch and stream failures at t
   for (const failure of [new Error(secret), new DOMException(secret, "TimeoutError")]) {
     if (stage === "profile") remote.mockResolvedValueOnce(tokenResponse());
     remote.mockRejectedValueOnce(failure);
-    await expectFailure(await worker.fetch(callback(flow), config), 502, "github_connection_failed");
+    await expectFailure(await worker.fetch(callback(flow), config), 502, "github_connection_failed", stage);
   }
   const body = new ReadableStream<Uint8Array>({
     start(controller) { controller.enqueue(new TextEncoder().encode('{"partial":')); },
@@ -226,9 +232,65 @@ it.each(["token", "profile"] as const)("sanitizes fetch and stream failures at t
   });
   if (stage === "profile") remote.mockResolvedValueOnce(tokenResponse());
   remote.mockResolvedValueOnce(new Response(body));
-  await expectFailure(await worker.fetch(callback(flow), config), 502, "github_connection_failed");
+  await expectFailure(await worker.fetch(callback(flow), config), 502, "github_connection_failed", stage);
   expect(body.locked).toBe(false);
   expect(warning.mock.calls).toEqual(Array.from({ length: 3 }, () => [JSON.stringify({ event: "github_login_failed", stage, code: "github_connection_failed", status: 502 })]));
+});
+
+it.each(["token", "profile"] as const)("rejects redirects at the %s step without following or reflecting the destination", async stage => {
+  noStorage(); const flow = await start(), warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+  const remote = vi.spyOn(globalThis, "fetch"), location = "https://evil.example/redirect-target-secret";
+  for (const accept of ["application/json", "text/html"]) {
+    if (stage === "profile") remote.mockResolvedValueOnce(tokenResponse());
+    remote.mockResolvedValueOnce(new Response("upstream-body-secret", { status: 307, headers: {
+      Location: location, "X-SpiderWatch-Auth-Step": "upstream-stage-secret", "X-SpiderWatch-GitHub-Status": "599",
+    } }));
+    const response = await worker.fetch(callback(flow, "", { Accept: accept, "X-SpiderWatch-Auth-Step": "request-stage-secret" }), githubSettings());
+    expect(response.headers.get("Location")).toBeNull();
+    expect(response.headers.get("X-SpiderWatch-Auth-Step")).toBe(stage);
+    expect(response.headers.get("X-SpiderWatch-GitHub-Status")).toBe("307");
+    const headers = JSON.stringify([...response.headers]);
+    if (accept === "application/json") await expectFailure(response, 502, "github_redirect_rejected", stage, 307);
+    else {
+      const html = await response.text();
+      expect(response.status).toBe(502); expect(html).toContain("<h1>GitHub 验证地址异常</h1>");
+      expect(html).toContain(`<small>${stage === "token" ? "授权交换" : "账户读取"} · GitHub HTTP 307</small>`);
+      for (const value of [location, "upstream-body-secret", "upstream-stage-secret", "request-stage-secret"]) expect(html).not.toContain(value);
+    }
+    for (const value of [location, "upstream-body-secret", "upstream-stage-secret", "request-stage-secret"]) expect(headers).not.toContain(value);
+  }
+  const expectedUrls = stage === "token" ? ["https://github.com/login/oauth/access_token"]
+    : ["https://github.com/login/oauth/access_token", "https://api.github.com/user"];
+  expect(remote.mock.calls.map(([input]) => String(input))).toEqual([...expectedUrls, ...expectedUrls]);
+  for (const [, init] of remote.mock.calls) expect(init?.redirect).toBe("manual");
+  expect(warning.mock.calls).toEqual(Array.from({ length: 2 }, () => [JSON.stringify({ event: "github_login_failed", stage,
+    code: "github_redirect_rejected", status: 502, upstream_status: 307 })]));
+});
+
+it.each(["token", "profile"] as const)("distinguishes non-JSON HTTP errors from network errors at the %s step", async stage => {
+  noStorage(); const flow = await start(), warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+  const remote = vi.spyOn(globalThis, "fetch"), body = '<script>alert("upstream-body-secret")</script>';
+  for (const accept of ["application/json", "text/html"]) {
+    if (stage === "profile") remote.mockResolvedValueOnce(tokenResponse());
+    remote.mockResolvedValueOnce(new Response(body, { status: 503, headers: {
+      Location: "https://evil.example/http-error-secret", "X-SpiderWatch-Auth-Step": "upstream-stage-secret",
+      "X-SpiderWatch-GitHub-Status": "599", "Content-Type": "text/html",
+    } }));
+    const response = await worker.fetch(callback(flow, "", { Accept: accept }), githubSettings());
+    expect(response.headers.get("Location")).toBeNull();
+    expect(response.headers.get("X-SpiderWatch-Auth-Step")).toBe(stage);
+    expect(response.headers.get("X-SpiderWatch-GitHub-Status")).toBe("503");
+    expect(JSON.stringify([...response.headers])).not.toContain("secret");
+    if (accept === "application/json") await expectFailure(response, 502, "github_http_error", stage, 503);
+    else {
+      const html = await response.text();
+      expect(response.status).toBe(502); expect(html).toContain("<h1>GitHub 请求失败</h1>");
+      expect(html).toContain(`<small>${stage === "token" ? "授权交换" : "账户读取"} · GitHub HTTP 503</small>`);
+      expect(html).not.toContain("secret"); expect(html).not.toContain("<script>");
+    }
+  }
+  expect(warning.mock.calls).toEqual(Array.from({ length: 2 }, () => [JSON.stringify({ event: "github_login_failed", stage,
+    code: "github_http_error", status: 502, upstream_status: 503 })]));
 });
 
 it("preserves a response-size failure when cancelling its stream also fails", async () => {

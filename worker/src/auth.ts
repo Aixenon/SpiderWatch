@@ -87,7 +87,7 @@ export async function authorize(request: Request, env: Env, role: "agent" | "adm
 }
 
 class LoginFailure extends Error {
-  constructor(readonly code: string, readonly status = 502) { super(code); }
+  constructor(readonly code: string, readonly status = 502, readonly upstreamStatus?: number) { super(code); }
 }
 
 function tokenError(error: unknown): LoginFailure {
@@ -103,8 +103,11 @@ function tokenError(error: unknown): LoginFailure {
 
 async function githubJSON(url: string, init: RequestInit, step: "token" | "profile"): Promise<Record<string, unknown>> {
   let response: Response;
-  try { response = await fetch(url, { ...init, redirect: "error", signal: AbortSignal.timeout(10_000) }); }
+  try { response = await fetch(url, { ...init, redirect: "manual", signal: AbortSignal.timeout(10_000) }); }
   catch { throw new LoginFailure("github_connection_failed"); }
+  if (response.status >= 300 && response.status < 400) {
+    await response.body?.cancel().catch(() => {}); throw new LoginFailure("github_redirect_rejected", 502, response.status);
+  }
   if (response.status === 429 || response.status === 403 && (response.headers.get("X-RateLimit-Remaining") === "0" || response.headers.has("Retry-After"))) {
     await response.body?.cancel().catch(() => {}); throw new LoginFailure("github_rate_limited", 429);
   }
@@ -125,7 +128,7 @@ async function githubJSON(url: string, init: RequestInit, step: "token" | "profi
   for (const chunk of chunks) { buffer.set(chunk, offset); offset += chunk.byteLength; }
   let data: unknown;
   try { data = JSON.parse(new TextDecoder().decode(buffer)); }
-  catch { throw new LoginFailure(response.ok ? "github_response_invalid" : "github_connection_failed"); }
+  catch { throw new LoginFailure(response.ok ? "github_response_invalid" : "github_http_error", 502, response.ok ? undefined : response.status); }
   if (!data || typeof data !== "object" || Array.isArray(data)) throw new LoginFailure("github_response_invalid");
   if (step === "token" && "error" in data) throw tokenError(data.error);
   if (!response.ok) throw new LoginFailure(step === "profile" && response.status === 401 ? "github_token_rejected" : step === "profile" ? "github_profile_failed" : "github_token_exchange_failed");
@@ -185,7 +188,10 @@ export async function handleLogin(request: Request, env: Env): Promise<Response 
   } catch (error) {
     const failure = error instanceof LoginFailure ? error : new LoginFailure("github_session_failed", 500);
     // Never log provider response bodies, URLs, authorization codes or credentials.
-    console.warn(JSON.stringify({ event: "github_login_failed", stage, code: failure.code, status: failure.status }));
-    return authError(failure.code, failure.status);
+    console.warn(JSON.stringify({ event: "github_login_failed", stage, code: failure.code, status: failure.status, ...(failure.upstreamStatus ? { upstream_status: failure.upstreamStatus } : {}) }));
+    const response = authError(failure.code, failure.status);
+    response.headers.set("X-SpiderWatch-Auth-Step", stage);
+    if (failure.upstreamStatus) response.headers.set("X-SpiderWatch-GitHub-Status", String(failure.upstreamStatus));
+    return response;
   }
 }

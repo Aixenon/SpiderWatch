@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { afterEach, expect, it, vi } from "vitest";
 import worker from "../src/index";
+import { panelAuthFailure } from "../src/panel-auth";
 import { githubSettings, origin, sessionHeaders, sessionName, sessionToken } from "./github-fixture";
 
 afterEach(() => vi.restoreAllMocks());
@@ -61,4 +62,24 @@ it("labels loopback sessions explicitly and rejects public local mode", async ()
   expect(await response.json()).toMatchObject({ authenticated: true, login: null, mode: "local" });
   expect((await worker.fetch(new Request(origin + "/panel/api/session"), env)).status).toBe(403);
   expect(storage).not.toHaveBeenCalled();
+});
+
+it.each([
+  ["token", "503", "<small>授权交换 · GitHub HTTP 503</small>"],
+  ["profile", "403", "<small>账户读取 · GitHub HTTP 403</small>"],
+  ["session", "", "<small>建立会话</small>"],
+  ["token", '<script>alert("status-secret")</script>', "<small>授权交换</small>"],
+  ['<script>alert("stage-secret")</script>', "503", ""],
+] as const)("renders only fixed diagnostic labels for step %s", async (step, upstream, expected) => {
+  const request = new Request(origin + "/panel/auth/github/callback", { headers: { Accept: "text/html" } });
+  const response = panelAuthFailure(request, new Response("response-body-secret", { status: 502, headers: {
+    "X-SpiderWatch-Auth-Error": "github_http_error", "X-SpiderWatch-Auth-Step": step,
+    "X-SpiderWatch-GitHub-Status": upstream,
+  } }));
+  const html = await response.text();
+  expect(html).toContain("<h1>GitHub 请求失败</h1>");
+  if (expected) expect(html).toContain(expected);
+  else expect(html).not.toContain("GitHub HTTP");
+  for (const value of ["response-body-secret", "status-secret", "stage-secret", "<script>"]) expect(html).not.toContain(value);
+  if (upstream.includes("script")) expect(html).not.toContain("GitHub HTTP");
 });
