@@ -62,7 +62,7 @@ func TestConfigureJoinCodeCasePreservesIdentityAndApproval(t *testing.T) {
 			t.Fatal("same network required approval again", result, err)
 		}
 	}
-	for _, code := range []string{"a1b2c3d4e5f6g7h9", "short", "abcdefghijklmno-", ""} {
+	for _, code := range []string{"short", "abcdefghijklmno-", ""} {
 		if _, err := command(code); err == nil {
 			t.Error("incorrect network code was accepted", code)
 		}

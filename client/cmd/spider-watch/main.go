@@ -168,8 +168,18 @@ func execute(ctx context.Context, args []string, out, errOut io.Writer) (resultE
 			}
 			c.Access = agent.AccessCredentials{ClientID: os.Getenv("CF_ACCESS_CLIENT_ID"), ClientSecret: os.Getenv("CF_ACCESS_CLIENT_SECRET")}
 		}
-		if c.Group != "" && ((*server != "" && strings.TrimRight(*server, "/") != c.Server) || (*group != "" && *group != c.Group)) {
-			return errors.New("already joined another server or network; stop the service and leave before switching")
+		serverChanged := *server != "" && strings.TrimRight(*server, "/") != c.Server
+		if c.Group != "" && (serverChanged || (*group != "" && *group != c.Group)) {
+			// Switching is local: stop reporting to the old network even if the
+			// new enrollment fails. Its remote device record remains registered.
+			c.Group, c.Name, c.Invitation, c.Gate = "", "", "", ""
+			alreadyRegistered = false
+		}
+		if serverChanged {
+			// Endpoint credentials and private trust roots must not follow the
+			// device to another collector. Explicit flags below can supply new ones.
+			c.Access, c.CAFile = agent.AccessCredentials{}, ""
+			c.Invitation, c.Gate = "", ""
 		}
 		if visited["server"] {
 			c.Server = strings.TrimRight(*server, "/")
@@ -213,8 +223,18 @@ func execute(ctx context.Context, args []string, out, errOut io.Writer) (resultE
 		} else if os.Getenv("CF_ACCESS_CLIENT_ID") != "" || os.Getenv("CF_ACCESS_CLIENT_SECRET") != "" {
 			c.Access = agent.AccessCredentials{ClientID: os.Getenv("CF_ACCESS_CLIENT_ID"), ClientSecret: os.Getenv("CF_ACCESS_CLIENT_SECRET")}
 		}
-		// Save the stable identity before the network call, but only persist a
-		// new network selection after a successful enrollment response.
+		if serverChanged && c.Access.ClientID == "" && c.IdentityMode == "" {
+			c.Bootstrap = true
+		}
+		requestedConfig := c
+		if *group != "" {
+			requestedConfig.Group = *group
+		}
+		if err = requestedConfig.ValidateSetup(); err != nil {
+			return err
+		}
+		// Persist identity and any local leave before contacting the new server.
+		// Only save a new network selection after successful enrollment.
 		if err = agent.SaveSetupConfig(*configPath, c); err != nil {
 			return err
 		}
@@ -358,7 +378,42 @@ func execute(ctx context.Context, args []string, out, errOut io.Writer) (resultE
 			return printJSON(out, map[string]string{"state": "installed", "version": plan.Version, "result_file": resultPath})
 		}
 		return printJSON(out, map[string]string{"state": "installing", "version": plan.Version, "result_file": resultPath, "message": "installation finishes after this command exits; inspect result_file for installed or failed"})
-	case "status", "leave":
+	case "leave":
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if flags.NArg() != 0 {
+			return errors.New("unexpected positional arguments")
+		}
+		restartInstalled, err := agent.PauseInstalledService(*configPath)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if restartInstalled {
+				if _, restoreErr := agent.StartInstalledService(*configPath); restoreErr != nil {
+					resultErr = errors.Join(resultErr, errors.New("could not restore the installed service; start it again"))
+				}
+			}
+		}()
+		lock, err := agent.AcquireLock(*configPath)
+		if err != nil {
+			return err
+		}
+		defer lock.Close()
+		c, err := agent.LoadSetupConfig(*configPath)
+		if err != nil {
+			return err
+		}
+		// Never depend on a remote response to leave. Retain the identity and
+		// server settings so rejoining the same network keeps its authorization.
+		c.Group, c.Invitation, c.Gate = "", "", ""
+		if err = agent.SaveSetupConfig(*configPath, c); err != nil {
+			return err
+		}
+		restartInstalled = false
+		return printJSON(out, map[string]string{"node_id": c.NodeID, "state": "left"})
+	case "status":
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -366,29 +421,11 @@ func execute(ctx context.Context, args []string, out, errOut io.Writer) (resultE
 		if err != nil {
 			return err
 		}
-		var lock *agent.RunLock
-		if args[0] == "leave" {
-			lock, err = agent.AcquireLock(*configPath)
-			if err != nil {
-				return err
-			}
-			defer lock.Close()
-		}
 		client, err := agent.NewClient(c)
 		if err != nil {
 			return err
 		}
 		defer client.Close()
-		if args[0] == "leave" {
-			if _, err = client.Leave(ctx); err != nil {
-				return err
-			}
-			c.Group = ""
-			if err = agent.SaveSetupConfig(*configPath, c); err != nil {
-				return err
-			}
-			return printJSON(out, map[string]string{"node_id": c.NodeID, "state": "left"})
-		}
 		response, err := client.Status(ctx)
 		if err != nil {
 			return err
@@ -515,7 +552,7 @@ Commands:
   status    query device approval state without exposing credentials
   --update  check and install a newer stable release (update is an alias)
   update --check  inspect the advertised release without downloading it
-  leave     leave the network and keep local identity (stop service first)
+  leave     stop the installed service and leave locally; keep device identity
   collect   print one local metrics snapshot; no account required
   doctor    diagnose connectivity and local resource budget
   service   print a systemd unit with a 32 MiB hard memory limit

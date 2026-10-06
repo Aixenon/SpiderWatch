@@ -210,7 +210,3 @@ func (c *Client) Status(ctx context.Context) (ControlResponse, error) {
 func (c *Client) Report(ctx context.Context, report ReportRequest) (ControlResponse, error) {
 	return c.request(ctx, http.MethodPost, "/v1/metrics", report)
 }
-
-func (c *Client) Leave(ctx context.Context) (ControlResponse, error) {
-	return c.request(ctx, http.MethodDelete, "/v1/nodes/"+c.config.NodeID, nil)
-}
