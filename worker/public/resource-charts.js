@@ -1,6 +1,6 @@
 // Shared geometry for bounded live samples and the existing persisted history.
 export const HISTORY_POINTS = 120;
-export const DEFAULT_CHART_SECONDS = 300;
+export const DEFAULT_CHART_SECONDS = 60;
 export const CHART_RANGES = [{seconds:60,label:"1 分钟"},{seconds:300,label:"5 分钟"},{seconds:1800,label:"30 分钟"},{seconds:3600,label:"1 小时"},{seconds:86400,label:"24 小时"},{seconds:604800,label:"7 天"}];
 const valid = value => typeof value === "number" && Number.isFinite(value) && value >= 0;
 export function chartGeometry(input = [], keys = [], fixedMaximum, windowMs, endTime) {

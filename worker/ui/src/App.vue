@@ -39,7 +39,7 @@ async function exit() {
         <RouterLink to="/settings" :class="{ active: route.path === '/settings' }">设置</RouterLink>
       </nav>
       <div class="header-end">
-        <button type="button" class="secondary theme-toggle" :aria-label="themeHint" :title="themeHint" @click="setThemeMode(nextTheme)">
+        <button type="button" class="button-quiet header-action theme-toggle" :aria-label="themeHint" :title="themeHint" @click="setThemeMode(nextTheme)">
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <template v-if="themeMode === 'auto'"><circle cx="12" cy="12" r="8.5"/><path d="M12 7v5l3 2"/></template>
             <template v-else-if="themeMode === 'light'"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></template>
@@ -47,7 +47,10 @@ async function exit() {
           </svg>
           <span>{{ themeLabel }}</span>
         </button>
-        <button v-if="authenticated" class="button-quiet" aria-label="退出登录" :disabled="exiting" @click="exit">退出</button>
+        <button v-if="authenticated" type="button" class="button-quiet header-action" aria-label="退出登录" :disabled="exiting" @click="exit">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 4H5a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h5M9 12h11m-4-4 4 4-4 4"/></svg>
+          <span>退出</span>
+        </button>
       </div>
     </header>
 
@@ -66,7 +69,10 @@ async function exit() {
 
 <style scoped>
 .session-loading{text-align:center;color:var(--muted);padding:64px 0}
-.theme-toggle{width:116px;min-height:34px;padding:5px 8px;gap:6px;font-size:12px;font-weight:500;background:var(--panel);color:var(--ink);border-color:var(--line)}
-.theme-toggle svg{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
-@media(max-width:600px){.theme-toggle{width:104px;font-size:11px}}
+.header-end{gap:8px}
+.header-end .header-action{min-height:34px;padding:5px 10px;gap:6px;font-size:12px;font-weight:500;background:transparent;color:var(--muted);border:0}
+.header-end .header-action:not(:disabled):hover{background:var(--panel-soft);color:var(--ink);filter:none}
+.header-action svg{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.theme-toggle{width:116px}
+@media(max-width:600px){.header-end .header-action{font-size:11px;padding:5px 8px}.theme-toggle{width:104px}}
 </style>
