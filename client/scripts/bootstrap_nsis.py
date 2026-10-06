@@ -90,6 +90,18 @@ def unpack(archive, destination):
             source.extractall(destination, filter='data')
 
 
+def native_command(bundle):
+    major, minor = VERSION.split('.')
+    # Source archives default to a dated .cvs version; also set feature-detection metadata.
+    return [sys.executable, '-m', 'SCons', '-j2',
+            'VERSION=' + VERSION, 'VER_MAJOR=' + major, 'VER_MINOR=' + minor,
+            'VER_REVISION=0', 'VER_BUILD=0',
+            'SKIPSTUBS=all', 'SKIPPLUGINS=all', 'SKIPUTILS=all',
+            'SKIPMISC=all', 'NSIS_CONFIG_CONST_DATA_PATH=no',
+            'PREFIX=' + str(bundle), 'PREFIX_BIN=' + str(bundle / 'bin'),
+            'install-compiler']
+
+
 def bootstrap(cache):
     cache = Path(cache).resolve()
     cache.mkdir(parents=True, exist_ok=True)
@@ -99,7 +111,7 @@ def bootstrap(cache):
     target = cache / ('nsis-' + VERSION + '-' + platform)
     compiler = target / ('makensis.exe' if platform == 'windows' else 'bin/makensis')
     marker = target / 'spiderwatch-toolchain.json'
-    identity = {'version': VERSION, 'sources': SOURCES, 'platform': platform}
+    identity = {'version': VERSION, 'sources': SOURCES, 'platform': platform, 'builder': 2}
     if marker.is_file() and json.loads(marker.read_text()) == json.loads(json.dumps(identity)) and compiler.is_file():
         return {'compiler': str(compiler), 'directory': str(target)}
     with tempfile.TemporaryDirectory(prefix='nsis-build-', dir=cache) as directory:
@@ -113,18 +125,14 @@ def bootstrap(cache):
             environment = os.environ.copy()
             environment.update(PYTHONPATH=str(scons), NSISDIR=str(bundle))
             # Official POSIX build: reuse the released Windows stubs and plugins.
-            subprocess.run([sys.executable, '-m', 'SCons', '-j2',
-                            'SKIPSTUBS=all', 'SKIPPLUGINS=all', 'SKIPUTILS=all',
-                            'SKIPMISC=all', 'NSIS_CONFIG_CONST_DATA_PATH=no',
-                            'PREFIX=' + str(bundle), 'PREFIX_BIN=' + str(bundle / 'bin'),
-                            'install-compiler'],
+            subprocess.run(native_command(bundle),
                            cwd=temporary / 'nsis-3.13-src', env=environment,
                            stdout=sys.stderr, check=True, timeout=300)
         built = bundle / ('makensis.exe' if platform == 'windows' else 'bin/makensis')
         option = '/' if platform == 'windows' else '-'
         reported = subprocess.check_output([str(built), option + 'VERSION'], text=True).strip()
         if reported != 'v' + VERSION:
-            raise ValueError('Unexpected native NSIS compiler version')
+            raise ValueError(f'Unexpected native NSIS compiler version: {reported[:120]!r}; expected v{VERSION}')
         (bundle / marker.name).write_text(json.dumps(identity))
         if target.exists():
             shutil.rmtree(target)

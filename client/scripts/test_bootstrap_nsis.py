@@ -11,6 +11,14 @@ import bootstrap_nsis as bootstrap
 
 
 class BootstrapTests(unittest.TestCase):
+    def test_native_build_uses_release_and_feature_detection_versions(self):
+        command = bootstrap.native_command(Path('/cache/nsis'))
+        arguments = dict(item.split('=', 1) for item in command if '=' in item)
+        self.assertEqual(arguments['VERSION'], '3.13')
+        self.assertEqual((arguments['VER_MAJOR'], arguments['VER_MINOR'],
+                          arguments['VER_REVISION'], arguments['VER_BUILD']), ('3', '13', '0', '0'))
+        self.assertEqual(Path(arguments['PREFIX_BIN']), Path('/cache/nsis/bin'))
+
     def test_pinned_download_is_reused_only_when_digest_matches(self):
         with tempfile.TemporaryDirectory() as directory:
             cache = Path(directory)
