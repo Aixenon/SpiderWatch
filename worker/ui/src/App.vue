@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { loadState, notify, runtime, state, watchLive } from "./monitor";
-import { theme, toggleTheme } from "./theme";
+import { theme, themeMode, setThemeMode, startTheme, stopTheme, type ThemeMode } from "./theme";
 import { authenticated, logout, sessionLoading, startSession } from "./session";
 import Login from "./components/Login.vue";
 
@@ -12,7 +12,8 @@ const pending = computed(() => state.nodes.filter(n => n.state === "pending").le
 const livePage = computed(() => authenticated.value && (route.path === "/" || (route.path.startsWith("/server/") && state.nodes.some(n => n.node_id === route.params.id && n.state === "approved"))));
 watch(livePage, watchLive, { immediate: true });
 onMounted(startSession);
-onBeforeUnmount(() => watchLive(false));
+onMounted(startTheme);
+onBeforeUnmount(() => { watchLive(false); stopTheme(); });
 async function exit() {
   if (exiting.value) return;
   exiting.value = true;
@@ -33,7 +34,7 @@ async function exit() {
         <RouterLink to="/admin" :class="{ active: route.path === '/admin' }">管理<span v-if="pending" class="nav-count">{{ pending }}</span></RouterLink>
         <RouterLink to="/settings" :class="{ active: route.path === '/settings' }">设置</RouterLink>
       </nav>
-      <div class="header-end"><button class="button-quiet theme-toggle" :aria-label="theme === 'dark' ? '切换浅色模式' : '切换深色模式'" @click="toggleTheme">{{ theme === 'dark' ? '☀ 浅色' : '☾ 深色' }}</button><button v-if="authenticated" class="button-quiet" aria-label="退出登录" :disabled="exiting" @click="exit">退出</button></div>
+      <div class="header-end"><select class="theme-toggle" aria-label="显示模式" title="自动：本地时间 07:00–19:00 浅色，其余时间深色" :value="themeMode" @change="setThemeMode(($event.target as HTMLSelectElement).value as ThemeMode)"><option value="auto">{{ themeMode === 'auto' ? `自动 · ${theme === 'dark' ? '深色' : '浅色'}` : '自动' }}</option><option value="light">浅色</option><option value="dark">深色</option></select><button v-if="authenticated" class="button-quiet" aria-label="退出登录" :disabled="exiting" @click="exit">退出</button></div>
     </header>
 
     <div v-if="authenticated && runtime.notice" class="notice" :class="{ error: runtime.error }" role="status" aria-live="polite">{{ runtime.notice }}</div>
@@ -51,4 +52,6 @@ async function exit() {
 
 <style scoped>
 .session-loading{text-align:center;color:var(--muted);padding:64px 0}
+.theme-toggle{width:116px;min-height:34px;padding:5px 8px;font-size:12px;background:var(--panel);color:var(--ink);border-color:var(--line)}
+@media(max-width:600px){.theme-toggle{width:104px;font-size:11px}}
 </style>

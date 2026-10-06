@@ -42,7 +42,7 @@
 .device-card-footer>span:last-child>span{margin-left:2px}
 .device-card:hover .device-card-footer>span:last-child{color:var(--accent)}
 .device-card-offline{--panel:#23262c;--panel-soft:#2b2f36;--line:#414750;--ink:#c2c8d0;--muted:#a0a9b5;--accent:#adb7c4;--meter-track:#3c434d;background:var(--panel);border-color:var(--line)}
-:root[data-theme=light] .device-card-offline{--panel:#f0f1f3;--panel-soft:#e8eaee;--line:#d0d5dc;--ink:#515b68;--muted:#626c79;--accent:#657181;--meter-track:#d7dce3}
+:root[data-theme=light] .device-card-offline{--panel:#f0f1f3;--panel-soft:#e8eaee;--line:#d0d5dc;--ink:#515b68;--muted:#5d6876;--accent:#5d6876;--meter-track:#d7dce3}
 .device-card-offline .device-card-status{color:var(--muted)}
 .overview-empty{padding:70px 24px;border:1px dashed var(--line);border-radius:4px}
 .overview-empty h2{font-size:16px}
