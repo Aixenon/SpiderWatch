@@ -2,7 +2,7 @@
 import { computed, reactive, watch } from "vue";
 import { useRoute } from "vue-router";
 import { historyStatus, loadHistory, resourcePoints, state } from "../monitor";
-import { bytes, cpuCoreCounts, groupLabel, number, statusLabel, time, uptime, usageClass } from "../format";
+import { bytes, cpuCoreCounts, groupLabel, number, statusClass, statusLabel, time, uptime, usageClass } from "../format";
 import { cpuDetails, memoryDetails, diskGroups, volumeName, diskSummary } from "../../../public/metrics.js";
 import { CHART_RANGES, DEFAULT_CHART_SECONDS } from "../../../public/resource-charts.js";
 import ResourceChart from "../components/ResourceChart.vue";
@@ -44,7 +44,7 @@ watch(() => node.value?.node_id, () => {
     <RouterLink to="/" class="back-link">← 返回总览</RouterLink>
     <div class="page-heading resource-heading">
       <div class="resource-identity"><span class="resource-device-icon"><DeviceIcon :name="node.icon"/></span><div><h1>{{ node.name }}</h1><p class="muted">{{ groupLabel(node.group_id) }} · {{ node.host.os || '不可用' }} / {{ node.host.arch || '不可用' }}</p></div></div>
-      <div class="detail-actions"><span class="status" :class="node.connected ? 'online' : 'offline'"><i></i>{{ statusLabel(node) }}</span></div>
+      <div class="detail-actions"><span class="status" :class="statusClass(node)"><i></i>{{ statusLabel(node) }}</span></div>
     </div>
     <div v-if="!node.connected" class="inline-notice"><span>设备已离线，保留最后收到的数据。</span><span>最后在线 {{ time(node.last_seen) }}</span></div>
     <div v-if="history.error" class="inline-notice" role="status"><span>{{ history.error }}</span><button class="secondary small" :disabled="history.loading" @click="retryHistory">重试</button></div>

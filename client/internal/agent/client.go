@@ -25,6 +25,7 @@ type Client struct {
 	configPath    string
 	liveHealthy   func()
 	liveReady     func(context.Context) error
+	liveConfig    func(int)
 	remoteUpdates remoteUpdateControl
 }
 

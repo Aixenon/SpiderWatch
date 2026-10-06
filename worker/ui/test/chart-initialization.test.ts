@@ -64,6 +64,19 @@ beforeEach(async () => {
 afterEach(async () => { page.hidden = true; lockSession(); await nextTick(); vi.clearAllTimers(); });
 afterAll(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
+it("keeps HTTPS devices online in yellow, expires presence locally, and clears yellow on recovery", async () => {
+  await open();
+  const { statusClass, statusLabel } = await import("../src/format");
+  Socket.latest.receive({type:"metrics",node_id:"new-device",last_seen:start,metrics:node().metrics,report_interval_seconds:20,degraded:true,online_until:start+2000});
+  const current=monitor.state.nodes[0];
+  expect(statusClass(current)).toBe("degraded");expect(statusLabel(current)).toBe("在线");
+  const calls=requestMock.mock.calls.length;
+  await vi.advanceTimersByTimeAsync(1000);expect(current.connected).toBe(true);
+  await vi.advanceTimersByTimeAsync(1000);expect(statusLabel(current)).toBe("离线");
+  expect(requestMock.mock.calls.length).toBe(calls);
+  receive(start+5000,5);expect(statusClass(current)).toBe("online");expect(statusLabel(current)).toBe("在线");
+});
+
 it("starts a newly joined device empty, then adds only its first real report", async () => {
   const initial = node(0); initial.metrics.time = "";
   await open(snapshot([initial]));
@@ -109,10 +122,24 @@ it("keeps a newer socket sample and its reporting interval when an older state r
   requestMock.mockReturnValueOnce(new Promise(done => { resolve = done; }));
   const reading = monitor.loadState(true); await Promise.resolve();
   receive(start + 60000, 60);
+  Socket.latest.receive({type:"metrics",node_id:"new-device",last_seen:start+60000,metrics:node(start+60000).metrics,report_interval_seconds:60,degraded:true,online_until:start+240000});
   resolve(snapshot([node(start, 5)])); await reading;
   expect(monitor.state.nodes[0].report_interval_seconds).toBe(60);
+  expect(monitor.state.nodes[0].degraded).toBe(true);
+  expect(monitor.state.nodes[0].online_until).toBe(start+240000);
   receive(start + 120000, 60);
   expect(points().map(point => point.cpu)).toEqual([20, 20, 20]);
+});
+
+it("applies fresh disconnect presence while retaining newer chart data than the stored checkpoint",async()=>{
+  await open();receive(start+20000,5);
+  requestMock.mockResolvedValue({...snapshot([{...node(start,5),degraded:true,online_until:start+200000}]),as_of:start+30000});
+  await monitor.loadState(true);
+  expect(monitor.state.nodes[0]).toMatchObject({last_seen:start+20000,connected:true,degraded:true,online_until:start+200000});
+  receive(start+25000,5);
+  expect(monitor.state.nodes[0].degraded).toBe(true);
+  receive(start+40000,5);
+  expect(monitor.state.nodes[0].degraded).toBe(false);
 });
 
 it.each([undefined, 0, -1, NaN])("falls back to the configured interval for invalid report metadata %s", async interval => {

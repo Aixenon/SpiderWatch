@@ -88,7 +88,10 @@ it("opens only one five-minute window and a replacement command invalidates the 
 it("closes old multi-device windows during upgrade while preserving registered identities",async()=>{
   const {device}=await registered();
   await invite();
-  await runInDurableObject(stub(),(_,ctx)=>ctx.storage.sql.exec("UPDATE config SET value='2' WHERE id=4"));
+  await runInDurableObject(stub(),(_,ctx)=>{
+    ctx.storage.sql.exec("CREATE TABLE auth_nonces (node_id TEXT NOT NULL,nonce TEXT NOT NULL,expires_at INTEGER NOT NULL,PRIMARY KEY(node_id,nonce))");
+    ctx.storage.sql.exec("UPDATE config SET value='2' WHERE id=4");
+  });
   await evictDurableObject(stub());
   const state=await (await admin("/api/state?view=live")).json<any>();
   expect(state.invitations).toEqual([]);

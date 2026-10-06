@@ -29,7 +29,7 @@ async function consume(request:Request) {
   const response=await worker.fetch(request,env);
   return response.status===101?response:new Response(await response.arrayBuffer(),{status:response.status,headers:response.headers});
 }
-const admin=(path:string,method="GET")=>consume(new Request(origin+"/panel"+path,{method,headers:{Origin:origin}}));
+const admin=(path:string,method="GET",body?:unknown)=>consume(new Request(origin+"/panel"+path,{method,headers:{Origin:origin,"Content-Type":"application/json"},body:body===undefined?undefined:JSON.stringify(body)}));
 const state=async()=>await(await admin("/api/state?view=live")).json() as any;
 async function registered() {
   const device=await identity(),invitation=await(await admin("/api/invitations","POST")).json() as any;
@@ -70,8 +70,9 @@ afterEach(async()=>{for(const ws of clients)try{ws.close(1000);}catch{}clients.c
 
 it("authenticates HTTP metrics, limits their rate, and restores the latest snapshot after hibernation",async()=>{
   const device=await registered(),now=Date.now(),clock=vi.spyOn(Date,"now").mockReturnValue(now);
+  await viewer();
   const first=await signed(device,"/v1/metrics","POST",body(device)),replay=first.clone();
-  expect(await(await consume(first)).json()).toEqual({state:"approved",transport:"websocket",interval_seconds:60});
+  expect(await(await consume(first)).json()).toEqual({state:"approved",transport:"websocket",interval_seconds:20});
   expect((await consume(replay)).status).toBe(409);
   expect((await report(device,2)).status).toBe(429);
   clock.mockReturnValue(now+60000);
@@ -80,9 +81,9 @@ it("authenticates HTTP metrics, limits their rate, and restores the latest snaps
   const checkpoint=await runInDurableObject(stub(),(_,ctx)=>ctx.storage.sql.exec("SELECT last_seen,latest FROM nodes WHERE node_id=?",device.id).one());
   expect(checkpoint.last_seen).toBe(now);expect(JSON.parse(checkpoint.latest as string).cpu_percent).toBe(10);
   await evictDurableObject(stub());
-  const node=(await state()).nodes[0];expect(node).toMatchObject({connected:true,last_seen:now+60000,report_interval_seconds:60,metrics:{cpu_percent:75}});
+  const node=(await state()).nodes[0];expect(node).toMatchObject({connected:true,degraded:true,last_seen:now+60000,report_interval_seconds:20,metrics:{cpu_percent:75}});
   const history=await(await admin(`/api/nodes/${device.id}/history?range=300`)).json() as any;
-  expect(history.to).toBe(now+60000);expect(history.points.at(-1)).toMatchObject({time:now+60000,interval_seconds:60});
+  expect(history.to).toBe(now+60000);expect(history.points.at(-1)).toMatchObject({time:now+60000,interval_seconds:20});
   clock.mockReturnValue(now+240001);expect((await state()).nodes[0].connected).toBe(false);
 });
 
@@ -116,7 +117,7 @@ it("replaces a genuinely stale WS even when usage accounting has touched its att
   await runInDurableObject(stub(),instance=>Reflect.get(instance,"flushUsage").call(instance));
   expect((await report(device,2,55)).status).toBe(200);
   expect(await runInDurableObject(stub(),(_,ctx)=>ctx.getWebSockets("agent").filter(ws=>!ws.deserializeAttachment().closed).length)).toBe(0);
-  expect((await state()).nodes[0]).toMatchObject({connected:true,metrics:{cpu_percent:55},report_interval_seconds:60});
+  expect((await state()).nodes[0]).toMatchObject({connected:true,degraded:true,metrics:{cpu_percent:55},report_interval_seconds:600});
 });
 
 it.each([false,true])("allows fallback after a WS has never delivered metrics (hello=%s)",async(hello)=>{
@@ -128,7 +129,7 @@ it.each([false,true])("allows fallback after a WS has never delivered metrics (h
   }
   clock.mockReturnValue(now+60000);
   expect((await report(device,1,65)).status).toBe(200);
-  expect((await state()).nodes[0]).toMatchObject({connected:true,metrics:{cpu_percent:65},report_interval_seconds:60});
+  expect((await state()).nodes[0]).toMatchObject({connected:true,degraded:true,metrics:{cpu_percent:65},report_interval_seconds:600});
   expect(await runInDurableObject(stub(),(_,ctx)=>ctx.getWebSockets("agent").filter(ws=>!ws.deserializeAttachment().closed).length)).toBe(0);
 });
 
@@ -170,12 +171,12 @@ it("piggybacks update commands during fallback and confirms the installed revisi
   const device=await registered(),now=Date.now(),clock=vi.spyOn(Date,"now").mockReturnValue(now);
   await bundle();expect((await report(device)).status).toBe(200);
   const job=await(await admin(`/api/nodes/${device.id}/update-check`,"POST")).json() as any;
-  expect(job).toMatchObject({state:"requested",version:"0.7.3",revision,expires_at:now+900000});
-  clock.mockReturnValue(now+60000);expect(await(await report(device,2)).json()).toMatchObject({update_request_id:job.request_id});
+  expect(job).toMatchObject({state:"requested",version:"0.7.3",revision,expires_at:now+1500000});
+  clock.mockReturnValue(now+600000);expect(await(await report(device,2)).json()).toMatchObject({update_request_id:job.request_id});
   const result=(state:string,extra={})=>signed(device,"/v1/update/result","POST",{request_id:job.request_id,state,...extra}).then(consume);
   expect((await result("accepted")).status).toBe(200);expect((await result("updating")).status).toBe(200);
   expect((await result("failed",{code:"update_trigger_failed"})).status).toBe(409);
-  clock.mockReturnValue(now+120000);
+  clock.mockReturnValue(now+1200000);
   expect(await(await report(device,3,12,{host:{...host,agent_version:"0.7.3",agent_revision:revision}})).json()).not.toHaveProperty("update_request_id");
   expect(await(await admin(`/api/nodes/${device.id}/update-status`)).json()).toMatchObject({state:"installed"});
 });
@@ -212,4 +213,97 @@ it.each(["consumed","expired"])("allows only one timely in-flight report after a
       expect(server.deserializeAttachment().sequence).toBe(2);
     }
   });
+});
+
+it("uses panel intervals with a twenty-second floor and accepts one report across a slow-down",async()=>{
+  const device=await registered(),now=Date.now(),clock=vi.spyOn(Date,"now").mockReturnValue(now);
+  await viewer();
+  expect(await(await report(device)).json()).toMatchObject({interval_seconds:20});
+  clock.mockReturnValue(now+15000);expect((await report(device,2)).status).toBe(429);
+  clock.mockReturnValue(now+20000);expect((await report(device,2)).status).toBe(200);
+  expect((await admin("/api/settings","PUT",{active_seconds:45,idle_seconds:600})).status).toBe(200);
+  clock.mockReturnValue(now+40000);expect(await(await report(device,3)).json()).toMatchObject({interval_seconds:45});
+  clock.mockReturnValue(now+60000);expect((await report(device,4)).status).toBe(429);
+  clock.mockReturnValue(now+85000);expect((await report(device,4)).status).toBe(200);
+  await runInDurableObject(stub(),async(instance,ctx)=>{const ws=ctx.getWebSockets("viewer")[0];ws.close(1000);await instance.webSocketClose(ws);});
+  clock.mockReturnValue(now+130000);expect(await(await report(device,5)).json()).toMatchObject({interval_seconds:600});
+  clock.mockReturnValue(now+175000);expect(await(await report(device,6)).json()).toMatchObject({code:"report_rate_exceeded",interval_seconds:600});
+  clock.mockReturnValue(now+730000);expect((await report(device,6)).status).toBe(200);
+});
+
+it("persists metrics, replay protection and accounting with one row write even without any socket",async()=>{
+  const device=await registered(),now=Date.now(),clock=vi.spyOn(Date,"now").mockReturnValue(now);
+  await viewer();await report(device);
+  await runInDurableObject(stub(),async(instance,ctx)=>{const ws=ctx.getWebSockets("viewer")[0];ws.close(1000);await instance.webSocketClose(ws);});
+  clock.mockReturnValue(now+20000);
+  const request=await signed(device,"/v1/metrics","POST",body(device,2,42));
+  const replay=request.clone();
+  const encoded=await request.clone().text();
+  await runInDurableObject(stub(),async(instance,ctx)=>{
+    const exec=ctx.storage.sql.exec.bind(ctx.storage.sql);let writes=0;
+    const spy=vi.spyOn(ctx.storage.sql,"exec").mockImplementation((query,...args)=>{const cursor=exec(query,...args);writes+=cursor.rowsWritten;return cursor;});
+    try {
+      const headers=new Headers(request.headers);headers.set("X-Monitor-Role","agent");headers.set("X-Monitor-Auth-Expires",String(Number.MAX_SAFE_INTEGER));
+      const response=await instance.fetch(new Request(request.url,{method:"POST",headers,body:encoded}));
+      expect(response.status).toBe(200);await response.arrayBuffer();
+      expect(writes).toBe(1);
+    } finally {spy.mockRestore();}
+  });
+  const totals=()=>runInDurableObject(stub(),instance=>Reflect.get(instance,"readQuota").call(instance).rows.find((row:any)=>row.id==="workers").value);
+  const before=await totals();await evictDurableObject(stub());expect(await totals()).toBe(before);
+  expect((await consume(replay)).status).toBe(409);
+  const node=(await state()).nodes[0];expect(node).toMatchObject({connected:true,degraded:true,metrics:{cpu_percent:42},online_until:now+1820000});
+  await runInDurableObject(stub(),instance=>Reflect.get(instance,"flushUsage").call(instance));
+  const saved=await totals();await evictDurableObject(stub());expect(await totals()).toBe(saved);
+});
+
+it("does not reuse an HTTP nonce for a new session or another signed endpoint after eviction",async()=>{
+  const device=await registered(),now=Date.now(),clock=vi.spyOn(Date,"now").mockReturnValue(now);
+  await viewer();const nonce="d".repeat(32);
+  expect((await consume(await signed(device,"/v1/metrics","POST",body(device),{"X-Monitor-Nonce":nonce}))).status).toBe(200);
+  await evictDurableObject(stub());clock.mockReturnValue(now+20000);
+  expect((await consume(await signed(device,"/v1/metrics","POST",body(device,2,11,{session:"b".repeat(32)}),{"X-Monitor-Nonce":nonce}))).status).toBe(409);
+  expect((await consume(await signed(device,"/v1/live","GET",undefined,{Upgrade:"websocket","X-Monitor-Nonce":nonce}))).status).toBe(409);
+  expect((await report(device,2)).status).toBe(200);
+});
+
+it("keeps a disconnected device yellow and online until its last-report lease expires",async()=>{
+  const device=await registered(),now=Date.now(),clock=vi.spyOn(Date,"now").mockReturnValue(now);
+  await viewer();const ws=await socket(device);await metrics(ws,1,35);await closeAgent();
+  expect((await state()).nodes[0]).toMatchObject({connected:true,degraded:true,last_seen:now,online_until:now+180000,metrics:{cpu_percent:35}});
+  await evictDurableObject(stub());
+  clock.mockReturnValue(now+179999);expect((await state()).nodes[0]).toMatchObject({connected:true,degraded:true});
+  clock.mockReturnValue(now+180001);expect((await state()).nodes[0]).toMatchObject({connected:false,degraded:false});
+  const recovered=await socket(device);await metrics(recovered,2,65);
+  expect((await state()).nodes[0]).toMatchObject({connected:true,degraded:false,online_until:0,metrics:{cpu_percent:65}});
+});
+
+it("migrates existing HTTPS snapshots and outstanding nonces without resetting authorization",async()=>{
+  const device=await registered(),now=Date.now(),nonce="e".repeat(32);
+  vi.spyOn(Date,"now").mockReturnValue(now);
+  await runInDurableObject(stub(),(_,ctx)=>{
+    ctx.storage.sql.exec("DROP TABLE fallback_nodes");
+    ctx.storage.sql.exec("CREATE TABLE fallback_nodes (node_id TEXT PRIMARY KEY,last_seen INTEGER NOT NULL,session TEXT NOT NULL,sequence INTEGER NOT NULL,update_control INTEGER NOT NULL,active INTEGER NOT NULL,latest TEXT NOT NULL DEFAULT '{}')");
+    ctx.storage.sql.exec("INSERT INTO fallback_nodes VALUES(?,?,?,?,?,?,?)",device.id,now,session,4,1,1,JSON.stringify(body(device,4,72).metrics));
+    ctx.storage.sql.exec("CREATE TABLE auth_nonces (node_id TEXT NOT NULL,nonce TEXT NOT NULL,expires_at INTEGER NOT NULL,PRIMARY KEY(node_id,nonce))");
+    ctx.storage.sql.exec("INSERT INTO auth_nonces VALUES(?,?,?)",device.id,nonce,now+300000);
+    ctx.storage.sql.exec("UPDATE config SET value='7' WHERE id=4");
+  });
+  await evictDurableObject(stub());
+  expect((await state()).nodes[0]).toMatchObject({state:"approved",connected:true,degraded:true,last_seen:now,report_interval_seconds:60,metrics:{cpu_percent:72}});
+  expect((await consume(await signed(device,"/v1/live","GET",undefined,{Upgrade:"websocket","X-Monitor-Nonce":nonce}))).status).toBe(409);
+  await runInDurableObject(stub(),(_,ctx)=>{
+    expect(ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE name='auth_nonces'").toArray()).toEqual([]);
+    expect(ctx.storage.sql.exec("SELECT sequence,online_until FROM fallback_nodes WHERE node_id=?",device.id).one()).toEqual({sequence:4,online_until:now+180000});
+  });
+});
+
+it("starts disconnect grace from the last actual report even after hibernation drops the live cache",async()=>{
+  const device=await registered(),now=Date.now(),clock=vi.spyOn(Date,"now").mockReturnValue(now);
+  await viewer();const ws=await socket(device);await metrics(ws,1,10);
+  clock.mockReturnValue(now+20000);await metrics(ws,2,70);await evictDurableObject(stub());
+  clock.mockReturnValue(now+30000);await closeAgent();
+  const snapshot=await state();
+  expect(snapshot.as_of).toBe(now+30000);
+  expect(snapshot.nodes[0]).toMatchObject({connected:true,degraded:true,online_until:now+200000});
 });

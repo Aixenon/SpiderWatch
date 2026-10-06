@@ -337,6 +337,9 @@ func (c *Client) live(ctx context.Context, collector *Collector, session string,
 					continue
 				}
 				version = control.Version
+				if c.liveConfig != nil {
+					c.liveConfig(control.Interval)
+				}
 				compress = control.Compression == "gzip"
 				if !configured && c.liveReady != nil {
 					if err := c.liveReady(readCtx); err != nil {

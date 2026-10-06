@@ -12,13 +12,21 @@ import (
 const fallbackAfterFailures = 3
 const fallbackReportInterval = time.Minute
 
+func fallbackInterval(seconds int, previous time.Duration) time.Duration {
+	if seconds < 20 || seconds > 86400 {
+		return previous
+	}
+	return time.Duration(seconds) * time.Second
+}
+
 type fallbackTiming struct {
-	report time.Duration
-	retry  func(int, bool) time.Duration
+	report   time.Duration
+	retry    func(int, bool) time.Duration
+	interval func(int, time.Duration) time.Duration
 }
 
 func defaultFallbackTiming() fallbackTiming {
-	return fallbackTiming{report: fallbackReportInterval, retry: fallbackRetryDelay}
+	return fallbackTiming{report: fallbackReportInterval, retry: fallbackRetryDelay, interval: fallbackInterval}
 }
 
 func fallbackRetryDelay(failures int, fallback bool) time.Duration {
@@ -41,10 +49,11 @@ func fallbackRetryDelay(failures int, fallback bool) time.Duration {
 }
 
 type fallbackLiveEvent struct {
-	ready   chan struct{}
-	healthy bool
-	done    bool
-	err     error
+	interval int
+	ready    chan struct{}
+	healthy  bool
+	done     bool
+	err      error
 }
 
 type fallbackReportResult struct {
@@ -69,7 +78,8 @@ func (c *Client) liveWithFallback(ctx context.Context, collector *Collector, ses
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	events := make(chan fallbackLiveEvent, 4)
-	previousReady, previousHealthy := c.liveReady, c.liveHealthy
+	previousReady, previousHealthy, previousConfig := c.liveReady, c.liveHealthy, c.liveConfig
+	c.liveConfig = func(seconds int) { events <- fallbackLiveEvent{interval: max(20, seconds)} }
 	c.liveReady = func(readyCtx context.Context) error {
 		resume := make(chan struct{})
 		select {
@@ -91,6 +101,11 @@ func (c *Client) liveWithFallback(ctx context.Context, collector *Collector, ses
 	var pendingReady chan struct{}
 	wsRunning, liveActive, fallback := false, false, false
 	failures, reportFailures := 0, 0
+	reportInterval := timing.report
+	resolveInterval := timing.interval
+	if resolveInterval == nil {
+		resolveInterval = func(int, time.Duration) time.Duration { return timing.report }
+	}
 	var nextReport time.Time
 	retryTimer := time.NewTimer(0)
 	reportTimer := time.NewTimer(time.Hour)
@@ -116,7 +131,7 @@ func (c *Client) liveWithFallback(ctx context.Context, collector *Collector, ses
 		if updateDone != nil {
 			<-updateDone
 		}
-		c.liveReady, c.liveHealthy = previousReady, previousHealthy
+		c.liveReady, c.liveHealthy, c.liveConfig = previousReady, previousHealthy, previousConfig
 	}()
 	stopReports := func() {
 		reportTimer.Stop()
@@ -145,6 +160,13 @@ func (c *Client) liveWithFallback(ctx context.Context, collector *Collector, ses
 				events <- fallbackLiveEvent{done: true, err: err}
 			}()
 		case event := <-events:
+			if event.interval > 0 {
+				reportInterval = resolveInterval(event.interval, reportInterval)
+				if previousConfig != nil {
+					previousConfig(event.interval)
+				}
+				continue
+			}
 			if event.ready != nil {
 				liveActive = true
 				stopReports()
@@ -188,14 +210,14 @@ func (c *Client) liveWithFallback(ctx context.Context, collector *Collector, ses
 			}
 			if failures >= fallbackAfterFailures && !fallback {
 				fallback = true
-				logger.Print("WebSocket unavailable; using HTTPS every 60 seconds while reconnecting")
+				logger.Print("WebSocket unavailable; using HTTPS with the panel reporting interval while reconnecting")
 			}
 			scheduleReport()
 			retryTimer.Reset(timing.retry(failures, fallback))
 		case <-reportTick:
 			stopReports()
-			// Never shorten this deadline after failures, configuration changes,
-			// failed WebSocket sessions, or a temporary successful reconnect.
+			// Keep one outstanding report and schedule from its start time, so
+			// failures or reconnect attempts cannot cause a burst of uploads.
 			now := time.Now()
 			*sequence++
 			report := ReportRequest{Protocol: ProtocolVersion, NodeID: c.config.NodeID, Session: session,
@@ -209,7 +231,11 @@ func (c *Client) liveWithFallback(ctx context.Context, collector *Collector, ses
 				done <- fallbackReportResult{control: control, err: err, started: started}
 			}(reportDone)
 		case result := <-reportDone:
-			nextReport = result.started.Add(timing.report)
+			var rejected *HTTPError
+			if result.err == nil || errors.As(result.err, &rejected) && rejected.Status == http.StatusTooManyRequests {
+				reportInterval = resolveInterval(result.control.Interval, reportInterval)
+			}
+			nextReport = result.started.Add(reportInterval)
 			reportCancel()
 			reportCancel, reportDone = nil, nil
 			if result.control.State == "revoked" || result.control.Code == "revoked" || errors.Is(result.err, ErrRevoked) {

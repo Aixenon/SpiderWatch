@@ -18,11 +18,11 @@ export type NodeMetrics = {
 };
 export type Node = {
   node_id: string; name: string; nickname: string; icon: DeviceIconID; group_id: string | null;
-  state: "approved" | "pending" | "revoked"; auto_update: boolean; connected: boolean; last_seen: number; report_interval_seconds?: number;
+  state: "approved" | "pending" | "revoked"; auto_update: boolean; connected: boolean; last_seen: number; report_interval_seconds?: number; degraded?: boolean; online_until?: number; presence_at?: number;
   host: { hostname: string; os: string; arch: string; cpus: number; physical_cpus?: number; logical_cpus?: number; cpu_model?: string; kernel?: string; agent_version: string; ip?: string };
   metrics: NodeMetrics; series: Point[];
 };
-type StateResponse = { group: string; settings: Settings; node_groups: Group[]; nodes: Omit<Node, "series">[] };
+type StateResponse = { as_of?: number; group: string; settings: Settings; node_groups: Group[]; nodes: Omit<Node, "series">[] };
 type HistoryResponse = { points: Point[]; to: number; from?: number; interval_seconds?: number; resolution_seconds?: number };
 export type UpdateCheck = {
   request_id: string; state: "requested" | "accepted" | "updating" | "installed" | "up_to_date" | "failed" | "timeout";
@@ -73,10 +73,15 @@ async function readState(): Promise<boolean> {
     const previous = new Map(state.nodes.map(node => [node.node_id, node]));
     state.nodes = data.nodes.map(raw => {
       const old = previous.get(raw.node_id);
-      const next = { ...raw, metrics: metrics(raw.metrics), icon: normalizeDeviceIcon(raw.icon), series: [] as Point[] };
+      const next = { ...raw, metrics: metrics(raw.metrics), icon: normalizeDeviceIcon(raw.icon), series: [] as Point[], presence_at:data.as_of || raw.last_seen };
       // A snapshot already in flight must not replace a newer socket report.
       if (old && old.last_seen > next.last_seen) {
-        next.metrics = old.metrics; next.last_seen = old.last_seen; next.connected = old.connected; next.report_interval_seconds = old.report_interval_seconds;
+        next.metrics = old.metrics; next.last_seen = old.last_seen; next.report_interval_seconds = old.report_interval_seconds;
+      }
+      // A fresh presence snapshot may contain an older metrics checkpoint
+      // after hibernation. Apply its status without rolling the graph back.
+      if (old && (old.presence_at || old.last_seen) > next.presence_at) {
+        next.connected = old.connected; next.degraded = old.degraded; next.online_until = old.online_until; next.presence_at = old.presence_at || old.last_seen;
       }
       const node = old ? Object.assign(old, next) : next;
       recordNode(node);
@@ -212,7 +217,7 @@ function connect() {
   };
   ws.onmessage = event => {
     if (socket !== ws || !hasSession()) return;
-    let message: { type?: string; settings?: Settings; node_id?: string; metrics?: NodeMetrics; last_seen?: number; report_interval_seconds?: number };
+    let message: { type?: string; settings?: Settings; node_id?: string; metrics?: NodeMetrics; last_seen?: number; report_interval_seconds?: number; degraded?: boolean; online_until?: number };
     try { message = JSON.parse(event.data); } catch { return; }
     if (!message || typeof message !== "object") return;
     if (["settings", "metrics", "refresh", "heartbeat_ack"].includes(message.type || "")) retry = 0;
@@ -222,7 +227,11 @@ function connect() {
       const node = state.nodes.find(candidate => candidate.node_id === message.node_id);
       if (!node) { void loadState(true); return; }
       if (message.last_seen < node.last_seen) return;
-      node.metrics = metrics(message.metrics); node.last_seen = message.last_seen; node.connected = true; node.report_interval_seconds = message.report_interval_seconds;
+      node.metrics = metrics(message.metrics); node.last_seen = message.last_seen; node.report_interval_seconds = message.report_interval_seconds;
+      if (message.last_seen >= (node.presence_at || 0)) {
+        node.connected = true; node.degraded = message.degraded === true; node.online_until = message.online_until || 0;
+        node.presence_at = message.last_seen;
+      }
       recordNode(node); historyRevision.value++; runtime.last_tick = message.last_seen;
     } else if (message.type === "refresh") void loadState(true);
     else if (message.type === "session_expired") lockSession("session_expired");
@@ -250,6 +259,15 @@ window.addEventListener("online", () => {
   stopLive(); connect();
 });
 setInterval(() => { if (hasSession() && !document.hidden) void loadState(); }, 120000);
+// HTTP presence has a server-issued lease. Expire it locally without adding
+// requests or pretending a lost viewer connection means every host is offline.
+setInterval(() => {
+  if (!hasSession() || document.hidden) return;
+  const now = Date.now();
+  for (const node of state.nodes) if (node.connected && node.degraded && node.online_until && now >= node.online_until) {
+    node.connected = false; node.degraded = false; node.presence_at = now;
+  }
+}, 1000);
 watch(authenticated, valid => { if (valid) resume(); });
 onSessionInvalidated(() => {
   wantsLive = false; stopLive(); refresh.invalidate(); clearTimeout(noticeTimer);

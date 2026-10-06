@@ -21,6 +21,7 @@ export const memoryPercent = (node: Node) => {
 };
 export const groupLabel = (id: string | null) => state.groups.find(g => g.id === id)?.name || "未分组";
 export const statusLabel = (node: Node) => node.state === "pending" ? "待加入" : node.connected ? "在线" : "离线";
+export const statusClass = (node: Node) => node.state === "pending" ? "pending" : !node.connected ? "offline" : node.degraded ? "degraded" : "online";
 export const time = (value: number) => value ? new Date(value).toLocaleTimeString("zh-CN", { hour12: false }) : "尚未上报";
 export const interval = (seconds: number) => seconds >= 60 && seconds % 60 === 0 ? `${seconds / 60} 分钟` : `${seconds} 秒`;
 export const uptime = (seconds: number | null | undefined) => known(seconds) ? `${Math.floor(seconds / 86400)} 天 ${Math.floor(seconds % 86400 / 3600)} 小时` : "不可用";

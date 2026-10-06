@@ -141,6 +141,8 @@ dialog,.device-config-scroll,#node-config-form{overscroll-behavior:contain}
 .resource-detail .volume-usage .meter{margin:0;width:65px;min-width:65px;height:4px}
 .resource-detail .resource-empty{font-size:13px;padding:8px 0}
 .resource-detail .system-facts{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 40px;margin-top:0;padding-top:0;border-top:0}
+.status.degraded{color:var(--status-warning)}
+.status.degraded i{background:currentColor}
 .resource-detail .system-facts .system-device-id{grid-column:1/-1}
 .resource-detail .system-facts .system-device-id dd{font-family:"Cascadia Code",Consolas,monospace}
 @media(max-width:740px){.resource-detail.compact-resources{padding-top:18px}.resource-detail.compact-resources .resource-panel{padding:15px}.resource-detail .resource-heading{gap:12px}.resource-detail .resource-heading h1{font-size:20px}.resource-detail .resource-heading p.muted{font-size:11px}.resource-detail .resource-device-icon{width:36px;height:36px}.resource-detail .resource-device-icon svg{width:23px;height:23px}.resource-detail .compact-facts{grid-template-columns:minmax(0,1fr);gap:9px}.resource-detail .nic-heading{align-items:flex-start;gap:10px;flex-wrap:wrap}.resource-detail .network-legend{gap:12px;font-size:12px}.resource-detail .nic-card{padding:12px}.resource-detail .nic-totals{gap:20px}.resource-detail .panel-heading .subtle-label{font-size:12px;text-align:right}.resource-detail .physical-disk>summary{gap:9px;padding:11px}.resource-detail .disk-heading{gap:4px 10px}}

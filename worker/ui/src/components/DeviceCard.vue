@@ -28,7 +28,7 @@ function rate(field: "rx_bytes_per_second" | "tx_bytes_per_second") {
 </script>
 
 <template>
-  <RouterLink :to="`/server/${node.node_id}`" class="device-card" :class="{ 'device-card-offline': !node.connected }" :aria-label="`查看 ${node.name} 的详情，${node.connected ? '在线' : '离线'}`">
+  <RouterLink :to="`/server/${node.node_id}`" class="device-card" :class="{ 'device-card-offline': !node.connected, 'device-card-degraded': node.connected && node.degraded }" :aria-label="`查看 ${node.name} 的详情，${node.connected ? '在线' : '离线'}`">
     <div class="device-card-heading"><div class="device-card-identity"><span class="device-card-icon" aria-hidden="true"><DeviceIcon :name="node.icon" /></span><span class="device-card-system" :title="`${node.host.os} · ${node.host.arch}`">{{ node.host.os }} · {{ node.host.arch }}</span></div><span v-if="!hasReport" class="device-card-status is-pending"><i></i>待上报</span></div>
     <h2 :title="node.name">{{ node.name }}</h2>
     <div class="device-card-group"><span :title="groupLabel(node.group_id)">{{ groupLabel(node.group_id) }}</span><span>{{ coreLabel }}</span></div>

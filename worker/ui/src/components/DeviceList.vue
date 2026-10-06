@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { api, lists, loadState, notify, state, type Node } from "../monitor";
 import { hasSession, onSessionInvalidated, sessionGeneration } from "../session";
 import { createDeviceUpdate } from "../device-update";
-import { groupLabel, statusLabel } from "../format";
+import { groupLabel, statusClass, statusLabel } from "../format";
 import { normalizeDeviceIcon } from "../../../public/device-icons.js";
 import DeviceIconPicker from "./DeviceIconPicker.vue";
 import DeviceIcon from "./DeviceIcon.vue";
@@ -83,7 +83,7 @@ function clearFilters() { Object.assign(filters, { query: "", group: "all", stat
           <tr v-for="node in rows" :key="node.node_id">
             <td><div class="device-cell"><span class="device-cell-icon" aria-hidden="true"><DeviceIcon :name="node.icon" /></span><div class="device-cell-copy"><RouterLink v-if="node.state === 'approved'" :to="`/server/${node.node_id}`" class="device-name">{{ node.name }}</RouterLink><span v-else class="device-name">{{ node.name }}</span><small>{{ node.host.os }} · {{ node.host.arch }} · {{ node.host.cpus }} 核</small></div></div></td>
             <td><span class="group-tag">{{ groupLabel(node.group_id) }}</span></td>
-            <td><span class="status" :class="node.state === 'pending' ? 'pending' : node.connected ? 'online' : 'offline'"><i></i>{{ statusLabel(node) }}</span></td>
+            <td><span class="status" :class="statusClass(node)"><i></i>{{ statusLabel(node) }}</span></td>
             <td><code :title="node.node_id">{{ node.node_id.slice(-12) }}</code></td><td class="actions-cell"><div class="row-actions"><button v-if="node.state === 'approved'" class="secondary small" @click="askConfig(node)">配置</button><button class="danger small" @click="askDelete(node)">删除</button></div></td>
           </tr>
         </tbody>

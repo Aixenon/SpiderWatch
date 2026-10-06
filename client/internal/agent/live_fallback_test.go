@@ -42,6 +42,71 @@ func TestFallbackRetryBoundsAndProductionIntervals(t *testing.T) {
 	}
 }
 
+func TestFallbackServerIntervalBounds(t *testing.T) {
+	for _, seconds := range []int{-1, 0, 1, 19, 86401} {
+		if got := fallbackInterval(seconds, time.Minute); got != time.Minute {
+			t.Fatalf("invalid interval %d replaced the last policy: %s", seconds, got)
+		}
+	}
+	for _, seconds := range []int{20, 45, 600, 86400} {
+		if got := fallbackInterval(seconds, time.Minute); got != time.Duration(seconds)*time.Second {
+			t.Fatalf("server interval %d was ignored: %s", seconds, got)
+		}
+	}
+}
+
+func TestFallbackSchedulesFromSuccessfulAndRateLimitedResponses(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var mu sync.Mutex
+	var reports []time.Time
+	intervals := []int{20, 600, 45, 20}
+	client, config, _ := tlsTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/live" {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		_, _ = io.Copy(io.Discard, r.Body)
+		mu.Lock()
+		reports = append(reports, time.Now())
+		index := len(reports) - 1
+		mu.Unlock()
+		if index >= len(intervals) {
+			cancel()
+			return
+		}
+		if index == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+		}
+		_ = json.NewEncoder(w).Encode(ControlResponse{State: "approved", Interval: intervals[index], Code: "report_rate_exceeded"})
+		if index == len(intervals)-1 {
+			cancel()
+		}
+	}))
+	defer client.Close()
+	timing := shortFallbackTiming()
+	timing.interval = func(seconds int, previous time.Duration) time.Duration {
+		return fallbackInterval(seconds, previous*time.Second/time.Millisecond) * time.Millisecond / time.Second
+	}
+	var sequence uint64
+	err := client.liveWithFallback(ctx, fallbackTestCollector(config), strings.Repeat("a", 32), &sequence, false, log.New(io.Discard, "", 0), timing)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(reports) != 4 {
+		t.Fatalf("got %d reports", len(reports))
+	}
+	for index := 1; index < len(reports); index++ {
+		elapsed := reports[index].Sub(reports[index-1])
+		minimum := time.Duration(intervals[index-1]) * time.Millisecond
+		if elapsed < minimum-2*time.Millisecond || elapsed > minimum+250*time.Millisecond {
+			t.Fatalf("interval %d: %s, wanted %s", index, elapsed, minimum)
+		}
+	}
+}
+
 func TestFallbackFailedSessionsKeepRetryingWithoutAcceleratingHTTP(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
