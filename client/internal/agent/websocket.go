@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -13,10 +15,44 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const livePingInterval = 60 * time.Second
-const liveReadTimeout = 180 * time.Second
+const livePingInterval = 30 * time.Second
+const liveReadTimeout = 90 * time.Second
 
 var errLiveSuperseded = errors.New("WebSocket connection replaced by another client")
+
+// Diagnostics contain only locally chosen categories and numeric status codes.
+// Never retain a peer's close reason, HTTP body, URL or authentication headers.
+type liveConnectionFailure struct {
+	kind string
+	code int
+}
+
+func (e *liveConnectionFailure) Error() string {
+	switch e.kind {
+	case "close":
+		return fmt.Sprintf("WebSocket closed (code=%d)", e.code)
+	case "handshake":
+		return fmt.Sprintf("WebSocket handshake rejected (HTTP %d)", e.code)
+	case "read-timeout":
+		return "WebSocket read timed out"
+	case "read":
+		return "WebSocket connection interrupted"
+	default:
+		return "WebSocket network or TLS connection failed"
+	}
+}
+
+func liveReadFailure(err error) error {
+	var closed *websocket.CloseError
+	if errors.As(err, &closed) {
+		return &liveConnectionFailure{kind: "close", code: closed.Code}
+	}
+	var network net.Error
+	if errors.As(err, &network) && network.Timeout() {
+		return &liveConnectionFailure{kind: "read-timeout"}
+	}
+	return &liveConnectionFailure{kind: "read"}
+}
 
 type liveTiming struct{ ping, read time.Duration }
 
@@ -53,7 +89,7 @@ func readLiveEvents(ctx context.Context, conn *websocket.Conn, events chan<- liv
 	for {
 		kind, data, err := conn.ReadMessage()
 		if err != nil {
-			send(liveEvent{err: errors.New("WebSocket connection interrupted")})
+			send(liveEvent{err: liveReadFailure(err)})
 			return
 		}
 		if kind != websocket.TextMessage {
@@ -110,7 +146,22 @@ func (c *Client) live(ctx context.Context, collector *Collector, session string,
 		h.Set("CF-Access-Client-Id", c.config.Access.ClientID)
 		h.Set("CF-Access-Client-Secret", c.config.Access.ClientSecret)
 	}
-	dialer := websocket.Dialer{NetDialContext: c.transport.DialContext,
+	var stopDialWatch func() bool
+	defer func() {
+		if stopDialWatch != nil {
+			stopDialWatch()
+		}
+	}()
+	dialer := websocket.Dialer{NetDialContext: func(dialCtx context.Context, network, address string) (net.Conn, error) {
+		raw, err := c.transport.DialContext(dialCtx, network, address)
+		if err == nil {
+			// Gorilla bounds upgrade reads with a deadline, but context
+			// cancellation alone does not close an established TCP connection
+			// still waiting for the HTTP upgrade response.
+			stopDialWatch = context.AfterFunc(ctx, func() { _ = raw.Close() })
+		}
+		return raw, err
+	},
 		TLSClientConfig: c.websocketTLS, HandshakeTimeout: time.Duration(c.config.Timeout) * time.Second,
 		ReadBufferSize: 1024, WriteBufferSize: 1024, EnableCompression: false}
 	c.Close()
@@ -123,11 +174,20 @@ func (c *Client) live(ctx context.Context, collector *Collector, session string,
 			if json.Unmarshal(data, &control) == nil && (control.State == "revoked" || control.Code == "revoked") {
 				return ErrRevoked
 			}
+			if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
+				if control.Code == "" && control.State == "pending" {
+					control.Code = "pending"
+				}
+				return &HTTPError{Status: response.StatusCode, Code: control.Code}
+			}
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		return errors.New("WebSocket connection failed") // Do not expose credentials or raw URLs.
+		if response != nil {
+			return &liveConnectionFailure{kind: "handshake", code: response.StatusCode}
+		}
+		return &liveConnectionFailure{kind: "connect"}
 	}
 	conn.SetReadLimit(MaxResponseBytes)
 	readCtx, cancel := context.WithCancel(ctx)
@@ -220,7 +280,7 @@ func (c *Client) live(ctx context.Context, collector *Collector, session string,
 			case "superseded":
 				return errLiveSuperseded
 			case "access_expired":
-				return errors.New("WebSocket authorization expired")
+				return &HTTPError{Status: http.StatusForbidden, Code: "access_expired"}
 			case "update":
 				if protocol != 2 || !helloSent || !validUpdateRequestID(control.RequestID) {
 					return errors.New("invalid WebSocket update request")
@@ -264,6 +324,12 @@ func (c *Client) live(ctx context.Context, collector *Collector, session string,
 					reschedule()
 				}
 			case "config":
+				if control.State == "revoked" {
+					return ErrRevoked
+				}
+				if control.State == "pending" {
+					return &HTTPError{Status: http.StatusForbidden, Code: "pending"}
+				}
 				if control.State != "approved" || control.Active < 2 || control.Active > 300 || control.Idle < 30 || control.Idle > 86400 || control.Idle < control.Active || control.Version < 1 || (control.Interval != control.Active && control.Interval != control.Idle) {
 					return errors.New("invalid WebSocket configuration")
 				}
@@ -272,6 +338,11 @@ func (c *Client) live(ctx context.Context, collector *Collector, session string,
 				}
 				version = control.Version
 				compress = control.Compression == "gzip"
+				if !configured && c.liveReady != nil {
+					if err := c.liveReady(readCtx); err != nil {
+						return err
+					}
+				}
 				if !configured && control.Protocol == 2 {
 					protocol = 2
 					host.Version = ""

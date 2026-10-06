@@ -102,7 +102,7 @@ func Run(ctx context.Context, config Config, options RunOptions) error {
 				}
 			}
 		} else if liveTransport {
-			err = client.Live(guardContext, collector, session, &sequence, options.Once)
+			err = client.liveWithFallback(guardContext, collector, session, &sequence, options.Once, logger, defaultFallbackTiming())
 			response = ControlResponse{State: "approved", Transport: "websocket"}
 			if errors.Is(err, ErrRevoked) {
 				return err

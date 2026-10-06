@@ -14,10 +14,11 @@ it("uses receipt time across device clock rollback and deduplicates replayed rep
   expect(history.get("device")).toHaveLength(3);
 });
 
-it("gives RX/TX a shared scale and leaves missing samples as gaps",()=>{
+it("gives RX/TX a shared scale and joins valid readings across missing samples",()=>{
   const graph=chartGeometry([{time:1,rx:100,tx:50},{time:2,rx:null,tx:100},{time:3,rx:2000,tx:0}],["rx","tx"]);
   expect(graph.maximum).toBe(2200);
-  expect(graph.series[0].path.match(/M/g)).toHaveLength(2);
+  expect(graph.series[0].path.match(/M/g)).toHaveLength(1);
+  expect(graph.series[0].path.match(/L/g)).toHaveLength(1);
   expect(graph.series[1].path.match(/L/g)).toHaveLength(2);
   expect(graph.series.every(s=>!s.path.includes("NaN"))).toBe(true);
   expect(chartGeometry([], ["rx","tx"]).maximum).toBe(1024);
@@ -79,4 +80,34 @@ it("uses each historical recording interval and chart resolution for missing-dat
   expect(mergeResourceHistory([point(1,601),point(601001,601)],[],30)).toHaveLength(2);
   // A change to shorter intervals must not mark the older cadence as missing.
   expect(mergeResourceHistory([point(1,3600),point(3600001,30)],[],30)).toHaveLength(2);
+});
+
+it("renders one current value for a replayed initial timestamp instead of a vertical spike",()=>{
+  const time=1700000000000;
+  const initial=chartGeometry([{time,cpu:0},{time,cpu:80},{time,cpu:20}],["cpu"],100,60000,time);
+  expect(initial.count).toBe(1);
+  expect(initial.series[0].path).toBe("M632.0,72.0");
+  expect(initial.series[0].markers).toEqual([{x:632,y:72}]);
+  const next=chartGeometry([{time,cpu:0},{time:time+5000,cpu:30},{time,cpu:20}],["cpu"],100,60000,time+5000);
+  expect(next.series[0].path).toBe("M582.7,72.0 L632.0,64.0");
+  expect(next.series[0].markers).toEqual([]);
+});
+
+it("joins surrounding real samples without filling missing initial or reconnect history",()=>{
+  const time=1700000000000;
+  const graph=chartGeometry([{time,cpu:0},{time:time+1,cpu:null},{time:time+30000,cpu:100}],["cpu"],100,60000,time+30000);
+  expect(graph.count).toBe(3);
+  expect(graph.series[0].path).toBe("M336.0,88.0 L632.0,8.0");
+  expect(graph.series[0].markers).toEqual([]);
+});
+
+it("skips missing NIC values independently without creating zero traffic or initial data",()=>{
+  const graph=chartGeometry([{time:1,rx:null},{time:2,rx:100},{time:3,tx:50},{time:4,rx:200,tx:100}],["rx","tx"]);
+  expect(graph.series[0].path).toBe("M237.3,80.2 L632.0,72.4");
+  expect(graph.series[1].path).toBe("M434.7,84.1 L632.0,80.2");
+  expect(graph.series.every(line=>line.markers.length===0)).toBe(true);
+  const empty=chartGeometry([{time:1,rx:null},{time:2}],["rx","tx"]);
+  expect(empty.series.every(line=>line.path===""&&line.markers.length===0)).toBe(true);
+  const single=chartGeometry([{time:1,rx:null},{time:2,rx:0},{time:3,rx:null}],["rx"]);
+  expect(single.series[0].markers).toEqual([{x:336,y:88}]);
 });

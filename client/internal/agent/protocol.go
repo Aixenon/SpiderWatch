@@ -116,18 +116,20 @@ type JoinRequest struct {
 }
 
 type ControlResponse struct {
-	Access    *AccessCredentials `json:"access,omitempty"`
-	State     string             `json:"state"`
-	Code      string             `json:"code,omitempty"`
-	Interval  int                `json:"interval_seconds,omitempty"`
-	Transport string             `json:"transport,omitempty"`
+	Access          *AccessCredentials `json:"access,omitempty"`
+	State           string             `json:"state"`
+	Code            string             `json:"code,omitempty"`
+	Interval        int                `json:"interval_seconds,omitempty"`
+	Transport       string             `json:"transport,omitempty"`
+	UpdateRequestID string             `json:"update_request_id,omitempty"`
 }
 
 type ReportRequest struct {
-	Protocol int      `json:"protocol"`
-	NodeID   string   `json:"node_id"`
-	Session  string   `json:"session"`
-	Sequence uint64   `json:"sequence"`
-	Host     HostInfo `json:"host"`
-	Metrics  Snapshot `json:"metrics"`
+	UpdateControl int      `json:"update_control,omitempty"`
+	Protocol      int      `json:"protocol"`
+	NodeID        string   `json:"node_id"`
+	Session       string   `json:"session"`
+	Sequence      uint64   `json:"sequence"`
+	Host          HostInfo `json:"host"`
+	Metrics       Snapshot `json:"metrics"`
 }

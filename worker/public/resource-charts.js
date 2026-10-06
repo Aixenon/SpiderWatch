@@ -4,7 +4,9 @@ export const DEFAULT_CHART_SECONDS = 60;
 export const CHART_RANGES = [{seconds:60,label:"1 分钟"},{seconds:300,label:"5 分钟"},{seconds:1800,label:"30 分钟"},{seconds:3600,label:"1 小时"},{seconds:86400,label:"24 小时"},{seconds:604800,label:"7 天"}];
 const valid = value => typeof value === "number" && Number.isFinite(value) && value >= 0;
 export function chartGeometry(input = [], keys = [], fixedMaximum, windowMs, endTime) {
-  const samples = input.filter(p => p && Number.isFinite(p.time)).sort((a,b)=>a.time-b.time);
+  // A refreshed snapshot replaces the same timestamp; never draw a vertical
+  // spike between two versions of one sample.
+  const samples = [...new Map(input.filter(p => p && Number.isFinite(p.time)).map(p => [p.time,p])).values()].sort((a,b)=>a.time-b.time);
   const windowed = valid(windowMs) && windowMs > 0;
   const last = valid(endTime) ? endTime : (samples.at(-1)?.time ?? 0);
   const first = windowed ? last-windowMs : (samples.slice(-HISTORY_POINTS)[0]?.time ?? last);
@@ -18,7 +20,8 @@ export function chartGeometry(input = [], keys = [], fixedMaximum, windowMs, end
     const markers = [];
     const endSegment = () => { if(segmentLength===1)markers.push(lastPosition);segmentLength=0; };
     for (const point of points) {
-      if (!valid(point[key])) { endSegment();connected = false; continue; }
+      // Missing readings add no invented value; join the surrounding real ones.
+      if (!valid(point[key])) continue;
       const x = !windowed && points.length === 1 ? 632 : 40 + (point.time - first) / span * 592;
       const y = 88 - Math.min(maximum, point[key]) / maximum * 80;
       path += `${connected ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)} `;

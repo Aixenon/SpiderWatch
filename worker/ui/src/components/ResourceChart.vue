@@ -37,7 +37,8 @@ const axisLabels = computed(() => geometry.value.count ? [geometry.value.first,(
         <line v-for="tick in geometry.ticks" :key="tick.value" x1="40" x2="632" :y1="tick.y" :y2="tick.y" class="resource-grid-line"/>
         <g v-for="line in geometry.series" :key="line.key">
           <path :d="line.path" fill="none" :stroke="lines.find(item => item.key===line.key)?.color" :stroke-dasharray="line.key==='tx'?'5 4':undefined" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>
-          <circle v-for="(marker,index) in line.markers" :key="index" :cx="marker.x" :cy="marker.y" r="2.2" :fill="lines.find(item => item.key===line.key)?.color"/>
+          <!-- A round zero-length stroke stays circular when the SVG stretches. -->
+          <path v-for="(marker,index) in line.markers" :key="index" :d="`M${marker.x},${marker.y}h0`" fill="none" :stroke="lines.find(item => item.key===line.key)?.color" stroke-width="4" stroke-linecap="round" vector-effect="non-scaling-stroke"/>
         </g>
       </svg>
     </div>

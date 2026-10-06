@@ -10,7 +10,7 @@ import {
   CHECKPOINT_MS, DEFAULT_SETTINGS, HISTORY_RETENTION_DAYS,
   MAX_MESSAGE_BYTES, MAX_NODES, USAGE_RETENTION_DAYS, VIEW_LEASE_MS,
   hash, isDeviceIcon, json, randomNetworkCode, readJSON, settingsInput, validHost, validReport,
-  type Device, type Host, type Metrics, type NetworkIdentity, type Settings,
+  type Device, type Host, type Metrics, type NetworkIdentity, type Settings, type Report,
 } from "./model";
 import { addCounts, countKeys, emptyCounts, forecast, hourOf, splitSpan, sumUsage, type Counts, type HourUsage } from "./usage";
 import { emptyUpdateCache, readBundledRelease, updateRepository, UpdateSourceError, type UpdateCache, type UpdateConfig, type UpdateState } from "./update-source";
@@ -19,16 +19,27 @@ import { activeUpdate, publicUpdate, type DeviceUpdate } from "./device-updates"
 type Attachment = {
   role: "agent" | "viewer"; id?: string; authExpires: number; expires?: number; closed?: boolean; closedAt?: number;
   interval?: number; version?: number; session?: string; sequence?: number; lastReport?: number; savedAt?: number;
+  connectedAt?: number; transitionInterval?: number; transitionUntil?: number;
   agentVersion?: string; agentRevision?: string; host?: Host; protocol?: 2; updateControl?: 1;
   epoch: number; hour: number; pending: Counts; exposureAt: number;
 };
 type Runtime = { created: number; checkpoint: number; epoch: number; viewCursor: number; viewing: boolean; viewExpires: number };
+const FALLBACK_SECONDS = 60, FALLBACK_LEASE_MS = 180_000;
+type Fallback = {node_id:string;last_seen:number;session:string;sequence:number;update_control:number;active:number;latest:string};
+function boundedHost(host: Host): Host {
+  return {hostname:host.hostname,os:host.os,arch:host.arch,cpus:host.cpus,agent_version:host.agent_version,
+    ...(host.agent_revision ? {agent_revision:host.agent_revision} : {}),
+    ...(host.physical_cpus === undefined ? {} : {physical_cpus:host.physical_cpus}),
+    ...(host.logical_cpus === undefined ? {} : {logical_cpus:host.logical_cpus}),
+    ...(host.cpu_model === undefined ? {} : {cpu_model:host.cpu_model}),
+    ...(typeof host.kernel === "string" && host.kernel.length <= 128 ? {kernel:host.kernel} : {})};
+}
 
 export class MonitorGroup extends DurableObject<Env> {
   private settings: Settings = DEFAULT_SETTINGS;
   private runtime!: Runtime;
   private network!: NetworkIdentity;
-  private latest = new Map<string, { metrics: Metrics; host: unknown; seen: number }>();
+  private latest = new Map<string, { metrics: Metrics; host: unknown; seen: number; interval?:number }>();
   private pending = new Map<number, Counts>();
   private duration = new ActiveDuration((start, end) => {
     splitSpan(start, end, (hour, seconds) => { this.counter(hour).handler_ms += seconds * 1000; });
@@ -98,6 +109,10 @@ export class MonitorGroup extends DurableObject<Env> {
       if (!schema || Number(schema.value) < 6) ctx.storage.transactionSync(() => {
         ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS node_updates (node_id TEXT PRIMARY KEY, value TEXT NOT NULL)");
         ctx.storage.sql.exec("INSERT OR REPLACE INTO config (id,value) VALUES (4,'6')");
+      });
+      if (!schema || Number(schema.value) < 7) ctx.storage.transactionSync(() => {
+        ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS fallback_nodes (node_id TEXT PRIMARY KEY, last_seen INTEGER NOT NULL, session TEXT NOT NULL, sequence INTEGER NOT NULL, update_control INTEGER NOT NULL, active INTEGER NOT NULL, latest TEXT NOT NULL DEFAULT '{}')");
+        ctx.storage.sql.exec("INSERT OR REPLACE INTO config (id,value) VALUES (4,'7')");
       });
       this.refreshInvitationDeadline();
       const config = new Map(this.query<{id:number;value:string}>("SELECT id,value FROM config WHERE id IN (1,2,3,9)").map(row => [row.id, row.value]));
@@ -188,8 +203,8 @@ export class MonitorGroup extends DurableObject<Env> {
     }
   }
 
-  // Counters stay in socket attachments between checkpoints, so hibernation
-  // does not discard every idle report. SQL writes are never per metrics frame.
+  // Counters stay in socket attachments between checkpoints. HTTP-only
+  // fallback checkpoints them because there is no attachment to survive sleep.
   private flushUsage(now = Date.now(), extra?: WebSocket): void {
     this.duration.checkpoint(now);
     const sockets = new Set([...this.ctx.getWebSockets(), ...(extra ? [extra] : [])]);
@@ -239,6 +254,11 @@ export class MonitorGroup extends DurableObject<Env> {
     const a = this.attachment(ws); if (!a) return;
     const interval = watching ? this.settings.active_seconds : this.settings.idle_seconds;
     if (!force && a.interval === interval && a.version === this.settings.version) return;
+    // One already-sent frame may arrive after a fast-to-idle config change.
+    // The allowance expires quickly and is consumed by the next accepted frame.
+    if (a.interval && interval > a.interval) {
+      a.transitionInterval = a.interval; a.transitionUntil = Date.now() + 30_000;
+    }
     a.interval = interval; a.version = this.settings.version;
     ws.serializeAttachment(a);
     this.send(ws, { type: "config", state: "approved", protocol: 2, compression: "gzip", viewing: watching, interval_seconds: interval, ...this.settings });
@@ -387,17 +407,19 @@ export class MonitorGroup extends DurableObject<Env> {
     const current = this.deviceUpdate(id);
     if (activeUpdate(current)) return json(publicUpdate(current));
     const socket = this.sockets("agent").find(ws => this.attachment(ws)?.id === id);
-    if (!socket) return json({code:"update_device_offline"},409);
-    const attachment = this.attachment(socket)!;
-    if (attachment.protocol !== 2 || attachment.updateControl !== 1) return json({code:"update_client_upgrade_required"},409);
+    const attachment = socket && this.attachment(socket)!;
+    const fallback = this.fallback(id);
+    const fallbackOnline = !!fallback?.active && fallback.last_seen > Date.now() - FALLBACK_LEASE_MS;
+    if (!socket && !fallbackOnline) return json({code:"update_device_offline"},409);
+    if (socket ? attachment!.protocol !== 2 || attachment!.updateControl !== 1 : fallback?.update_control !== 1) return json({code:"update_client_upgrade_required"},409);
     if (source.error || !source.current) return json({code:source.error || "update_bundle_unavailable"},503);
-    const host = attachment.host!;
+    const host = attachment?.host || JSON.parse(node.host) as Host;
     if (!source.current.assets.some(asset => asset.os === String(host.os).toLowerCase() && asset.arch === host.arch)) return json({code:"update_platform_unavailable"},409);
     const now = Date.now();
     const job: DeviceUpdate = {request_id:randomHex(16), version:source.current.version, revision:source.current.revision,
-      state:"requested", updated_at:now, expires_at:now + 10 * 60_000};
+      state:"requested", updated_at:now, expires_at:now + (socket ? 10 : 15) * 60_000};
     this.saveDeviceUpdate(id, job);
-    try { socket.send(JSON.stringify({type:"update",request_id:job.request_id})); }
+    try { socket?.send(JSON.stringify({type:"update",request_id:job.request_id})); }
     catch { job.state = "failed"; job.code = "update_send_failed"; this.saveDeviceUpdate(id, job); }
     return json(publicUpdate(job));
   }
@@ -405,10 +427,15 @@ export class MonitorGroup extends DurableObject<Env> {
     const body = await readJSON(request, 1024) as Record<string, unknown> | null;
     if (!body || typeof body.request_id !== "string" || !/^[a-f0-9]{32}$/.test(body.request_id)
       || !["accepted","updating","up_to_date","failed"].includes(String(body.state))
-      || (body.code !== undefined && body.code !== "update_failed")) return json({code:"invalid_update_result"},400);
+      || (body.code !== undefined && body.code !== "update_failed" && body.code !== "update_trigger_failed")) return json({code:"invalid_update_result"},400);
     if (!this.query("SELECT node_id FROM nodes WHERE node_id=? AND state='approved'",id).length) return json({code:"revoked"},403);
     const job = this.deviceUpdate(id);
     if (!activeUpdate(job) || job.request_id !== body.request_id) return json({code:"update_request_expired"},409);
+    if (body.code === "update_trigger_failed") {
+      if (body.state !== "failed" || job.claimed) return json({code:"update_request_conflict"},409);
+      job.state = "failed"; job.code = "update_trigger_failed"; job.updated_at = Date.now();
+      this.saveDeviceUpdate(id,job); return json({ok:true});
+    }
     // The privileged helper claims once. Socket receipt alone is not a claim.
     if (body.state === "accepted") {
       if (job.claimed) return json({code:"update_request_conflict"},409);
@@ -419,6 +446,71 @@ export class MonitorGroup extends DurableObject<Env> {
     if (body.state === "failed") job.code = "update_failed";
     this.saveDeviceUpdate(id, job);
     return json({ok:true});
+  }
+
+  private fallback(id: string): Fallback | undefined {
+    return this.query<Fallback>("SELECT * FROM fallback_nodes WHERE node_id=?", id)[0];
+  }
+  private confirmInstalled(id: string, host: Host): void {
+    const job = this.deviceUpdate(id);
+    if (activeUpdate(job) && job.claimed && job.version === host.agent_version && job.revision === host.agent_revision) {
+      job.state = "installed"; job.updated_at = Date.now(); this.saveDeviceUpdate(id,job);
+    }
+  }
+  private checkpointReport(body: Report, receivedAt: number, savedAt = 0): number {
+    if (savedAt && receivedAt - savedAt < this.settings.idle_seconds * 1000) return savedAt;
+    this.flushHistory(receivedAt);
+    const window = this.historyWindow || {from:receivedAt,deadline:receivedAt + this.settings.idle_seconds * 1000,interval:this.settings.idle_seconds,generation:crypto.randomUUID()};
+    this.ctx.storage.transactionSync(() => {
+      if (!this.historyWindow) this.query("INSERT INTO config(id,value) VALUES(9,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value",JSON.stringify(window));
+      this.query("UPDATE nodes SET latest=?,host=?,last_seen=?,history_window=?,history_interval_seconds=? WHERE node_id=?",
+        JSON.stringify(body.metrics),JSON.stringify(body.host),receivedAt,window.from,this.settings.idle_seconds,body.node_id);
+    });
+    this.historyWindow = window;
+    return receivedAt;
+  }
+  private publishReport(body: Report, receivedAt: number, interval: number): void {
+    this.latest.set(body.node_id,{metrics:body.metrics,host:body.host,seen:receivedAt,interval});
+    for (const viewer of this.sockets("viewer")) this.send(viewer,{type:"metrics",node_id:body.node_id,metrics:body.metrics,last_seen:receivedAt,report_interval_seconds:interval});
+  }
+  private async fallbackReport(request: Request, authenticated: Device, started: number): Promise<Response> {
+    if (authenticated.state !== "approved") return json({state:authenticated.state,code:authenticated.state},403);
+    if (request.headers.get("Content-Encoding") && request.headers.get("Content-Encoding") !== "identity") return json({code:"unsupported_encoding"},415);
+    const body = await readJSON(request);
+    if (!validReport(body,authenticated.node_id) || !/^[A-Za-z0-9._+-]{1,64}$/.test(body.host.agent_version)
+      || ((body as {update_control?:unknown}).update_control !== undefined && (body as {update_control?:unknown}).update_control !== 1)) return json({code:"invalid_report"},400);
+    const id = authenticated.node_id, now = Date.now(), control = (body as {update_control?:number}).update_control || 0;
+    const previous = this.fallback(id);
+    if (previous?.session === body.session && body.sequence <= previous.sequence) return json({code:"duplicate_report"},409);
+    if (previous && now - previous.last_seen < FALLBACK_SECONDS * 800) return json({code:"report_rate_exceeded"},429);
+    const live = this.sockets("agent").filter(ws => this.attachment(ws)?.id === id);
+    for (const ws of live) {
+      const a = this.attachment(ws)!;
+      if (a.session === body.session && body.sequence <= (a.sequence || 0)) return json({code:"duplicate_report"},409);
+      // Upgrade/hello can succeed only on the server while a proxy drops the
+      // reply. Only accepted metrics prove health; retries must not renew it.
+      if ((a.connectedAt || 0) >= started || (a.lastReport && now - a.lastReport < FALLBACK_LEASE_MS)) return json({code:"websocket_active"},409);
+    }
+    // A dead transport must not stay online because another transport reports.
+    // Never replace a socket that recovered while body/authentication yielded.
+    for (const ws of live) { ws.close(1000,"HTTPS fallback"); await this.closeSocket(ws); }
+    if (this.sockets("agent").some(ws => this.attachment(ws)?.id === id)) return json({code:"websocket_active"},409);
+    const device = this.query<Device>("SELECT * FROM nodes WHERE node_id=?",id)[0];
+    if (!device || device.state !== "approved" || device.public_key !== authenticated.public_key || device.key_hash !== authenticated.key_hash) return json({state:"revoked",code:"revoked"},403);
+    const current = this.fallback(id);
+    if (started < Math.max(this.latest.get(id)?.seen || 0,device.last_seen,current?.last_seen || 0)) return json({code:"stale_report"},409);
+    if (current?.session === body.session && body.sequence <= current.sequence) return json({code:"duplicate_report"},409);
+    if (current && now - current.last_seen < FALLBACK_SECONDS * 800) return json({code:"report_rate_exceeded"},429);
+    body.host = boundedHost(body.host);
+    const savedAt = this.checkpointReport(body,now,device.last_seen);
+    if (savedAt !== now && JSON.stringify(body.host) !== device.host) this.query("UPDATE nodes SET host=? WHERE node_id=?",JSON.stringify(body.host),id);
+    this.query("INSERT INTO fallback_nodes(node_id,last_seen,session,sequence,update_control,active,latest) VALUES(?,?,?,?,?,1,?) ON CONFLICT(node_id) DO UPDATE SET last_seen=excluded.last_seen,session=excluded.session,sequence=excluded.sequence,update_control=excluded.update_control,active=1,latest=excluded.latest",id,now,body.session,body.sequence,control,JSON.stringify(body.metrics));
+    this.confirmInstalled(id,body.host);
+    this.publishReport(body,now,FALLBACK_SECONDS);
+    await this.ensureAlarm(now);
+    const job = this.deviceUpdate(id);
+    return json({state:"approved",transport:"websocket",interval_seconds:FALLBACK_SECONDS,
+      ...(control === 1 && activeUpdate(job) && !job.claimed ? {update_request_id:job.request_id} : {})});
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -480,6 +572,7 @@ export class MonitorGroup extends DurableObject<Env> {
       if (url.pathname === "/v1/enroll" && request.method === "POST") return await this.enroll(request);
       const device = await this.authenticateDevice(request);
       if (device instanceof Response) return device;
+      if (url.pathname === "/v1/metrics" && request.method === "POST") return await this.fallbackReport(request, device, started);
       if (url.pathname === "/v1/update/request" || url.pathname === "/v1/update/result") {
         if (device.state !== "approved") return json({code:device.state},403);
         if (url.pathname.endsWith("/request") && request.method === "GET") {
@@ -506,6 +599,7 @@ export class MonitorGroup extends DurableObject<Env> {
         }
         const pair = new WebSocketPair(), a = this.newAttachment("agent", authExpires, device.node_id);
         a.agentVersion = agentVersion; a.agentRevision = agentRevision;
+        a.connectedAt = Date.now();
         // Keep the historical checkpoint across reconnects. A reconnect must
         // not multiply the selected historical recording rate.
         a.savedAt = device.last_seen || undefined;
@@ -521,11 +615,13 @@ export class MonitorGroup extends DurableObject<Env> {
       throw error;
     } finally {
       this.duration.end();
-      // Read-only status polling must not turn every HTTP request into SQL
-      // writes. Keep counters in a live attachment, or checkpoint at most once
-      // per five minutes when no socket exists (then HTTP counts are estimates).
-      const changesState = !["GET", "HEAD"].includes(request.method) && url.pathname !== "/bootstrap/status";
-      if ((changesState && this.counter().sql_written > writesBefore) || Date.now() - this.runtime.checkpoint >= CHECKPOINT_MS) this.flushUsage();
+      // Keep event counters in a live attachment when available. HTTP-only
+      // fallback needs a durable checkpoint before the object can sleep.
+      // Ordinary read-only polling keeps the existing five-minute estimate.
+      const fallback = url.pathname === "/v1/metrics";
+      const changesState = !["GET", "HEAD"].includes(request.method) && url.pathname !== "/bootstrap/status" && !fallback;
+      const changed = this.counter().sql_written > writesBefore;
+      if ((fallback && changed && !this.sockets().length) || (changesState && changed) || Date.now() - this.runtime.checkpoint >= CHECKPOINT_MS) this.flushUsage();
       else this.stashPendingCounters();
     }
   }
@@ -611,6 +707,7 @@ export class MonitorGroup extends DurableObject<Env> {
       this.counter().sql_written += batches.rowsWritten;
       this.query("DELETE FROM nodes WHERE node_id=?", id);
       this.query("DELETE FROM auth_nonces WHERE node_id=?", id);
+      this.query("DELETE FROM fallback_nodes WHERE node_id=?", id);
       this.query("DELETE FROM node_updates WHERE node_id=?", id);
       if (!this.historyWindow || !this.query("SELECT node_id FROM nodes WHERE history_window=? LIMIT 1", this.historyWindow.from).length) {
         this.query("DELETE FROM config WHERE id=9");
@@ -634,7 +731,9 @@ export class MonitorGroup extends DurableObject<Env> {
       const id = historyMatch[1];
       const node = this.query<{last_seen:number;latest:string;history_window:number;history_interval_seconds:number}>("SELECT last_seen,latest,history_window,history_interval_seconds FROM nodes WHERE node_id=?",id)[0];
       if (!node) return json({code:"node_not_found"},404);
-      const latest = this.latest.get(id);
+      const live = this.latest.get(id), fallback = this.fallback(id);
+      const latest = fallback && fallback.last_seen > Math.max(live?.seen || 0,node.last_seen)
+        ? {metrics:JSON.parse(fallback.latest) as Metrics,seen:fallback.last_seen,interval:FALLBACK_SECONDS} : live;
       // Every timestamp stays paired with its actual snapshot. Offline ranges
       // end at the last report, not at the time someone opens the panel.
       const seen = latest?.seen || node.last_seen;
@@ -662,7 +761,7 @@ export class MonitorGroup extends DurableObject<Env> {
       if (node.last_seen >= from && node.last_seen <= to && node.last_seen) add({ ...storedResourcePoint(node.last_seen, node.latest), interval_seconds: node.history_interval_seconds });
       if (seen) {
         const recorded = points.get(Math.floor((seen - from) / (resolution * 1000)));
-        const interval = recorded?.time === seen ? recorded.interval_seconds : this.settings.idle_seconds;
+        const interval = recorded?.time === seen ? recorded.interval_seconds : latest?.interval || this.settings.idle_seconds;
         add({ ...(latest ? resourcePoint(seen, latest.metrics) : storedResourcePoint(seen, node.latest)), interval_seconds: interval });
       }
       return json({points:[...points.values()].sort((a,b)=>a.time-b.time),from,to,interval_seconds:this.settings.idle_seconds,resolution_seconds:resolution,raw_points:timestamps.size});
@@ -705,7 +804,7 @@ export class MonitorGroup extends DurableObject<Env> {
       a.pending.connections++; a.pending.viewer_connections++;
       this.ctx.acceptWebSocket(pair[1], ["viewer"]); pair[1].serializeAttachment(a);
       await this.syncViewing(); this.send(pair[1], { type: "settings", settings: this.settings });
-      for (const [id, x] of this.latest) this.send(pair[1], { type: "metrics", node_id: id, metrics: x.metrics, last_seen: x.seen });
+      for (const [id, x] of this.latest) this.send(pair[1], { type: "metrics", node_id: id, metrics: x.metrics, last_seen: x.seen, report_interval_seconds:x.interval || this.settings.active_seconds });
       return new Response(null, { status: 101, webSocket: pair[0] });
     }
     if (url.pathname === "/api/settings" && request.method === "PUT") {
@@ -836,10 +935,13 @@ export class MonitorGroup extends DurableObject<Env> {
       }
       const groups = this.query<{id:string;name:string}>("SELECT * FROM node_groups ORDER BY name");
       const connected = new Map(this.sockets("agent").map(w => { const a = this.attachment(w)!; return [a.id, a]; }));
+      const fallback = new Map(this.query<Fallback>("SELECT * FROM fallback_nodes").map(row => [row.node_id,row]));
       const nodes = this.query<Device & {group_id: string | null}>("SELECT nodes.*, node_group_members.group_id FROM nodes LEFT JOIN node_group_members USING(node_id) ORDER BY nodes.name").map(n => {
-        const x = this.latest.get(n.node_id);
+        const row = fallback.get(n.node_id), live = this.latest.get(n.node_id);
+        const x = row && row.last_seen > Math.max(live?.seen || 0,n.last_seen) ? {metrics:JSON.parse(row.latest),host:JSON.parse(n.host),seen:row.last_seen,interval:FALLBACK_SECONDS} : live;
+        const fallbackOnline = !!row?.active && row.last_seen > now-FALLBACK_LEASE_MS;
         const attachment = connected.get(n.node_id), host = x?.host || attachment?.host || JSON.parse(n.host);
-        return { node_id: n.node_id, name: n.nickname || (host as {hostname:string}).hostname, nickname: n.nickname, icon: n.icon, auto_update: !!n.auto_update, group_id: n.group_id, state: n.state, host, metrics: x?.metrics || JSON.parse(n.latest), last_seen: x?.seen || n.last_seen, connected: connected.has(n.node_id) };
+        return { node_id: n.node_id, name: n.nickname || (host as {hostname:string}).hostname, nickname: n.nickname, icon: n.icon, auto_update: !!n.auto_update, group_id: n.group_id, state: n.state, host, metrics: x?.metrics || JSON.parse(n.latest), last_seen: x?.seen || n.last_seen, connected: connected.has(n.node_id) || fallbackOnline, report_interval_seconds:attachment?.interval || (fallbackOnline ? FALLBACK_SECONDS : x?.interval || this.settings.idle_seconds) };
       });
       const invitations = this.query("SELECT id,expires_at FROM invitations WHERE node_id IS NULL AND expires_at>? ORDER BY expires_at", now);
       if (!includeUsage) return json({ settings: this.settings, group: this.network.code, node_groups: groups, viewers: this.sockets("viewer").length, nodes, invitations });
@@ -902,12 +1004,7 @@ export class MonitorGroup extends DurableObject<Env> {
           if (a.protocol || (hello.update_control !== undefined && hello.update_control !== 1) || hello.protocol !== 2 || !a.agentVersion || typeof hello.session !== "string" || !/^[a-f0-9]{32}$/.test(hello.session) || !validHost(host)) { ws.close(1008, "invalid hello"); return; }
           // Store only bounded host fields: arbitrary client keys must not
           // grow the hibernation attachment or consume database storage.
-          a.host = { hostname: host.hostname, os: host.os, arch: host.arch, cpus: host.cpus, agent_version: a.agentVersion };
-          if (a.agentRevision) a.host.agent_revision = a.agentRevision;
-          if (host.physical_cpus !== undefined) a.host.physical_cpus = host.physical_cpus;
-          if (host.logical_cpus !== undefined) a.host.logical_cpus = host.logical_cpus;
-          if (host.cpu_model !== undefined) a.host.cpu_model = host.cpu_model;
-          if (typeof host.kernel === "string" && host.kernel.length <= 128) a.host.kernel = host.kernel;
+          a.host = boundedHost(host);
           const stored = this.query<{host:string}>("SELECT host FROM nodes WHERE node_id=?", a.id!)[0];
           if (!stored) { ws.close(1008, "device removed"); return; }
           const serializedHost = JSON.stringify(a.host);
@@ -915,10 +1012,13 @@ export class MonitorGroup extends DurableObject<Env> {
           // the panel still shows the upgraded version after the socket closes.
           if (stored.host !== serializedHost) this.query("UPDATE nodes SET host=? WHERE node_id=?", serializedHost, a.id!);
           a.protocol = 2; a.session = hello.session; a.sequence = 0; a.updateControl = hello.update_control;
-          const job = this.deviceUpdate(a.id!);
-          if (activeUpdate(job) && job.claimed && job.version === a.agentVersion && job.revision === a.agentRevision) {
-            job.state = "installed"; job.updated_at = Date.now(); this.saveDeviceUpdate(a.id!,job);
+          const fallback = this.fallback(a.id!);
+          if (fallback) {
+            if (fallback.session === a.session) a.sequence = fallback.sequence;
+            if (fallback.active) this.query("UPDATE fallback_nodes SET active=0 WHERE node_id=?",a.id!);
           }
+          this.confirmInstalled(a.id!,a.host);
+          const job = this.deviceUpdate(a.id!);
           ws.serializeAttachment(a); this.send(ws, {type: "hello_ack"});
           // Reuse the durable request after a lost frame or reconnect. The
           // helper's atomic claim and the client's ID cache prevent duplicates.
@@ -945,24 +1045,18 @@ export class MonitorGroup extends DurableObject<Env> {
         }
         if (!validReport(body, a.id!)) { ws.close(1008, "invalid report"); return; }
         if (body.session === a.session && body.sequence <= (a.sequence || 0)) { ws.close(1008, "duplicate report"); return; }
-        if (a.lastReport && started - a.lastReport < Math.max(1000, (a.interval || this.settings.idle_seconds) * 800)) { ws.close(1008, "report rate exceeded"); return; }
+        const limitingInterval = a.transitionUntil && a.transitionUntil >= started ? Math.min(a.interval || this.settings.idle_seconds,a.transitionInterval || this.settings.idle_seconds) : a.interval || this.settings.idle_seconds;
+        if (a.lastReport && started - a.lastReport < Math.max(1000, limitingInterval * 800)) { ws.close(1008, "report rate exceeded"); return; }
+        a.transitionInterval = undefined; a.transitionUntil = undefined;
         a.pending.other_messages--;
         if (watching) a.pending.fast_messages++; else a.pending.idle_messages++;
         // Decode can yield to another device. Timestamp accepted checkpoints
         // here so batches stay ordered by their primary-key start time.
         const receivedAt = Date.now();
         a.session = body.session; a.sequence = body.sequence; a.lastReport = receivedAt;
-        if (!a.savedAt || receivedAt - a.savedAt >= this.settings.idle_seconds * 1000) {
-          this.flushHistory(receivedAt);
-          const window = this.historyWindow || { from: receivedAt, deadline: receivedAt + this.settings.idle_seconds * 1000, interval: this.settings.idle_seconds, generation: crypto.randomUUID() };
-          const snapshot = JSON.stringify(body.metrics);
-          const host = JSON.stringify(body.host);
-          this.ctx.storage.transactionSync(() => {
-            if (!this.historyWindow) this.query("INSERT INTO config(id,value) VALUES(9,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value", JSON.stringify(window));
-            this.query("UPDATE nodes SET latest=?,host=?,last_seen=?,history_window=?,history_interval_seconds=? WHERE node_id=?", snapshot, host, receivedAt, window.from, this.settings.idle_seconds, a.id!);
-          });
-          this.historyWindow = window;
-          a.savedAt = receivedAt;
+        const savedAt = this.checkpointReport(body,receivedAt,a.savedAt);
+        if (savedAt !== a.savedAt) {
+          a.savedAt = savedAt;
           ws.serializeAttachment(a);
           await this.ensureAlarm(receivedAt);
           // Alarm storage yields too. A deletion, replacement or metering
@@ -971,8 +1065,7 @@ export class MonitorGroup extends DurableObject<Env> {
           if (!current || current.closed || current.authExpires <= Date.now()) return;
           Object.assign(a, current);
         }
-        this.latest.set(a.id!, { metrics: body.metrics, host: body.host, seen: receivedAt });
-        for (const viewer of this.sockets("viewer")) this.send(viewer, { type: "metrics", node_id: a.id, metrics: body.metrics, last_seen: receivedAt });
+        this.publishReport(body,receivedAt,a.interval || this.settings.idle_seconds);
         ws.serializeAttachment(a); this.configureAgent(ws);
         this.send(ws, { type: "ack", sequence: body.sequence });
       }
@@ -997,6 +1090,12 @@ export class MonitorGroup extends DurableObject<Env> {
     this.duration.begin();
     try {
       a.closed = true; a.closedAt = Date.now(); ws.serializeAttachment(a); this.closed.add(ws);
+      if (a.role === "agent" && a.session && a.sequence) {
+        const fallback = this.fallback(a.id!);
+        if (!this.sockets("agent").some(socket => this.attachment(socket)?.id === a.id) && (!fallback || fallback.session !== a.session || fallback.sequence < a.sequence)) {
+          this.query("INSERT INTO fallback_nodes(node_id,last_seen,session,sequence,update_control,active) VALUES(?,0,?,?,?,0) ON CONFLICT(node_id) DO UPDATE SET session=excluded.session,sequence=excluded.sequence,active=0",a.id!,a.session,a.sequence,a.updateControl || 0);
+        }
+      }
       this.flushUsage(Date.now(), ws);
       this.closed.delete(ws);
       await this.syncViewing();

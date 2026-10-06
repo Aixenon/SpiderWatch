@@ -24,6 +24,7 @@ type Client struct {
 	websocketTLS  *tls.Config
 	configPath    string
 	liveHealthy   func()
+	liveReady     func(context.Context) error
 	remoteUpdates remoteUpdateControl
 }
 
@@ -93,7 +94,14 @@ func (c *Client) request(ctx context.Context, method, path string, body any) (Co
 	var reader io.Reader
 	var encoded []byte
 	if body != nil {
-		b, err := json.Marshal(body)
+		var b []byte
+		var err error
+		if report, ok := body.(ReportRequest); ok {
+			var encoder reportEncoder
+			b, err = encoder.encode(report)
+		} else {
+			b, err = json.Marshal(body)
+		}
 		if err != nil || len(b) > MaxRequestBytes {
 			return result, errors.New("request exceeds size limit")
 		}

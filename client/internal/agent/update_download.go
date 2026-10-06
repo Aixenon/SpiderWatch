@@ -133,8 +133,7 @@ func (c *Client) downloadUpdateParts(ctx context.Context, origin *url.URL, asset
 	defer transport.CloseIdleConnections()
 	httpClient := *c.http
 	httpClient.Transport = transport
-	downloader := *c
-	downloader.http = &httpClient
+	downloader := Client{config: c.config, http: &httpClient, transport: transport}
 	partSize := (asset.Bytes + updateDownloadWorkers - 1) / updateDownloadWorkers
 	results := make(chan error, updateDownloadWorkers)
 	for index := range updateDownloadWorkers {

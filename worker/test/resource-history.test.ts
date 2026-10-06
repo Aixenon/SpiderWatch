@@ -71,7 +71,9 @@ it("preserves reconnection gaps after the dense live buffer rotates and history 
   cache.checkpoint("one",live.get("one")!.at(-1),live.get("one")!.at(-2));
   for(let i=0;i<125;i++){node.last_seen+=5000;recordSample(live,node);cache.checkpoint("one",live.get("one")!.at(-1));}
   const combined=mergeResourceHistory(cache.get("one").points,live.get("one")!);
-  expect(chartGeometry(combined.map(p=>({time:p.time,cpu:p.cpu})),["cpu"],100,3600000).series[0].path.match(/M/g)).toHaveLength(2);
+  expect(combined.some(p=>p.cpu===null)).toBe(true);
+  // Preserve missing-data metadata, but the chart joins its surrounding readings.
+  expect(chartGeometry(combined.map(p=>({time:p.time,cpu:p.cpu})),["cpu"],100,3600000).series[0].path.match(/M/g)).toHaveLength(1);
   cache.get("one").stale=true;
   fetcher.mockResolvedValue({points:[point(start),point(start+600000)],to:node.last_seen});
   await cache.load("one",604800);

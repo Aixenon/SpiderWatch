@@ -18,7 +18,7 @@ export type NodeMetrics = {
 };
 export type Node = {
   node_id: string; name: string; nickname: string; icon: DeviceIconID; group_id: string | null;
-  state: "approved" | "pending" | "revoked"; auto_update: boolean; connected: boolean; last_seen: number;
+  state: "approved" | "pending" | "revoked"; auto_update: boolean; connected: boolean; last_seen: number; report_interval_seconds?: number;
   host: { hostname: string; os: string; arch: string; cpus: number; physical_cpus?: number; logical_cpus?: number; cpu_model?: string; kernel?: string; agent_version: string; ip?: string };
   metrics: NodeMetrics; series: Point[];
 };
@@ -53,7 +53,8 @@ function metrics(value: NodeMetrics): NodeMetrics {
 }
 function recordNode(node: Node) {
   const previous = liveHistory.get(node.node_id)?.at(-1)?.time || 0;
-  recordSample(liveHistory, node, state.settings.active_seconds);
+  const interval = node.report_interval_seconds;
+  recordSample(liveHistory, node, typeof interval === "number" && Number.isFinite(interval) && interval > 0 ? interval : state.settings.active_seconds);
   const points = liveHistory.get(node.node_id) || [], gap = points.at(-2);
   storedHistory.checkpoint(node.node_id, points.at(-1),
     gap && gap.time > previous && gap.cpu === null && gap.memory === null && Object.keys(gap.networks).length === 0 ? gap : undefined,
@@ -75,7 +76,7 @@ async function readState(): Promise<boolean> {
       const next = { ...raw, metrics: metrics(raw.metrics), icon: normalizeDeviceIcon(raw.icon), series: [] as Point[] };
       // A snapshot already in flight must not replace a newer socket report.
       if (old && old.last_seen > next.last_seen) {
-        next.metrics = old.metrics; next.last_seen = old.last_seen; next.connected = old.connected;
+        next.metrics = old.metrics; next.last_seen = old.last_seen; next.connected = old.connected; next.report_interval_seconds = old.report_interval_seconds;
       }
       const node = old ? Object.assign(old, next) : next;
       recordNode(node);
@@ -211,7 +212,7 @@ function connect() {
   };
   ws.onmessage = event => {
     if (socket !== ws || !hasSession()) return;
-    let message: { type?: string; settings?: Settings; node_id?: string; metrics?: NodeMetrics; last_seen?: number };
+    let message: { type?: string; settings?: Settings; node_id?: string; metrics?: NodeMetrics; last_seen?: number; report_interval_seconds?: number };
     try { message = JSON.parse(event.data); } catch { return; }
     if (!message || typeof message !== "object") return;
     if (["settings", "metrics", "refresh", "heartbeat_ack"].includes(message.type || "")) retry = 0;
@@ -221,7 +222,7 @@ function connect() {
       const node = state.nodes.find(candidate => candidate.node_id === message.node_id);
       if (!node) { void loadState(true); return; }
       if (message.last_seen < node.last_seen) return;
-      node.metrics = metrics(message.metrics); node.last_seen = message.last_seen; node.connected = true;
+      node.metrics = metrics(message.metrics); node.last_seen = message.last_seen; node.connected = true; node.report_interval_seconds = message.report_interval_seconds;
       recordNode(node); historyRevision.value++; runtime.last_tick = message.last_seen;
     } else if (message.type === "refresh") void loadState(true);
     else if (message.type === "session_expired") lockSession("session_expired");

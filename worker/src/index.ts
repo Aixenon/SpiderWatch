@@ -62,6 +62,12 @@ export default {
     }
     if ((bootstrap || agent) && !local && url.protocol !== "https:") return json({ code: "https_required" }, 400);
     const enrollment = url.pathname === "/bootstrap/enroll" || url.pathname === "/v1/enroll";
+    if (url.pathname === "/v1/metrics") {
+      if (request.method !== "POST" || request.headers.get("Upgrade")) return json({code:"method_not_allowed"},405);
+      if (!hasDeviceCredentials(request)) return json({code:"device_auth_required"},401);
+      if (Number(request.headers.get("Content-Length")) > 32768) return json({code:"payload_too_large"},413);
+      if (request.headers.get("Content-Encoding") && request.headers.get("Content-Encoding") !== "identity") return json({code:"unsupported_encoding"},415);
+    }
     if (enrollment && Number(request.headers.get("Content-Length")) > 32768) return json({ code: "payload_too_large" }, 413);
     if (enrollment && !await verifyInvitation(env, request.headers.get("X-Monitor-Invitation") || "")) return json({ code: "invitation_invalid_or_expired" }, 403);
     if (bootstrap || enrollment) {
