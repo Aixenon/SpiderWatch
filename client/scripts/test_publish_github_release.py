@@ -2,8 +2,9 @@
 import copy
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
-from publish_github_release import ReleaseError, publish_release, validate_tag
+from publish_github_release import GitHub, MAX_RELEASE_PAGES, RELEASES_PER_PAGE, ReleaseError, publish_release, validate_tag
 
 
 COMMIT = "a" * 40
@@ -20,9 +21,14 @@ class FakeGitHub:
     def get(self, tag):
         return copy.deepcopy(self.release)
 
+    def get_by_id(self, release_id):
+        if self.release is None or self.release["id"] != release_id:
+            return None
+        return copy.deepcopy(self.release)
+
     def create(self, tag, commit):
         self.release = {"id": 1, "tag_name": tag, "target_commitish": commit, "draft": True, "prerelease": False, "assets": []}
-        return self.get(tag)
+        return copy.deepcopy(self.release)
 
     def upload(self, tag, asset):
         name = asset["path"].name
@@ -38,7 +44,7 @@ class FakeGitHub:
     def publish(self, release_id):
         self.published = True
         self.release["draft"] = False
-        return self.get(self.release["tag_name"])
+        return copy.deepcopy(self.release)
 
 
 def assets():
@@ -52,6 +58,25 @@ class PublishTests(unittest.TestCase):
         publish_release(github, "v0.4.0", COMMIT, assets())
         self.assertTrue(github.published)
         self.assertEqual(set(github.uploaded), set(assets()))
+
+    def test_new_draft_is_verified_by_id_when_tag_lookup_hides_it(self):
+        github = FakeGitHub()
+        # Only the initial lookup may use the tag. Draft responses are obtained
+        # by ID after creation and upload, as on GitHub's authenticated API.
+        with patch.object(github, "get", return_value=None) as get:
+            publish_release(github, "v0.4.0", COMMIT, assets())
+        self.assertTrue(github.published)
+        get.assert_called_once_with("v0.4.0")
+
+    def test_disappeared_or_changed_draft_is_not_published(self):
+        for complete in (None, {"id": 2, "draft": True}, {"id": 1, "draft": False},
+                         {"id": 1, "draft": True, "tag_name": "v0.4.0", "target_commitish": "b" * 40}):
+            with self.subTest(complete=complete):
+                github = FakeGitHub()
+                with patch.object(github, "get_by_id", return_value=complete):
+                    with self.assertRaises(ReleaseError):
+                        publish_release(github, "v0.4.0", COMMIT, assets())
+                self.assertFalse(github.published)
 
     def test_failed_upload_stays_draft_and_retry_only_uploads_missing_files(self):
         github = FakeGitHub(fail_upload="update-manifest.json")
@@ -98,6 +123,53 @@ class PublishTests(unittest.TestCase):
         for tag in ("v0.4.0-rc1", "v01.2.3", "0.4.0", "v1.2", "v1.2.3;echo unsafe"):
             with self.assertRaises(ReleaseError):
                 validate_tag(tag)
+
+
+class LookupTests(unittest.TestCase):
+    def setUp(self):
+        self.github = GitHub("owner/SpiderWatch", "offline-test-token")
+        self.draft = {"id": 42, "tag_name": "v0.7.0", "draft": True}
+
+    def test_existing_tag_response_does_not_list_releases(self):
+        with patch.object(self.github, "api", return_value=self.draft) as api:
+            self.assertEqual(self.github.get("v0.7.0"), self.draft)
+        api.assert_called_once_with("GET", "/releases/tags/v0.7.0", missing=True)
+
+    def test_hidden_draft_is_found_on_later_page_by_exact_tag(self):
+        first_page = [{"id": n + 100, "tag_name": f"v0.8.{n}", "draft": True} for n in range(RELEASES_PER_PAGE)]
+        with patch.object(self.github, "api", side_effect=[None, first_page, [self.draft]]) as api:
+            self.assertEqual(self.github.get("v0.7.0"), self.draft)
+        self.assertEqual(api.call_args_list[-1].args, ("GET", f"/releases?per_page={RELEASES_PER_PAGE}&page=2"))
+
+    def test_other_drafts_are_never_selected(self):
+        with patch.object(self.github, "api", side_effect=[None, [{"id": 43, "tag_name": "v0.7.00", "draft": True}]]):
+            self.assertIsNone(self.github.get("v0.7.0"))
+
+    def test_listing_a_published_matching_tag_still_prevents_overwrite(self):
+        published = {**self.draft, "draft": False}
+        with patch.object(self.github, "api", side_effect=[None, [published]]):
+            with self.assertRaisesRegex(ReleaseError, "already published"):
+                publish_release(self.github, "v0.7.0", COMMIT, assets())
+
+    def test_duplicate_matches_are_rejected(self):
+        with patch.object(self.github, "api", side_effect=[None, [self.draft, {**self.draft, "id": 43}]]):
+            with self.assertRaisesRegex(ReleaseError, "Multiple releases"):
+                self.github.get("v0.7.0")
+
+    def test_incomplete_bounded_search_does_not_allow_new_draft(self):
+        page = [{"id": n + 100, "tag_name": f"v0.8.{n}", "draft": True} for n in range(RELEASES_PER_PAGE)]
+        with patch.object(self.github, "api", side_effect=[None, *[page] * MAX_RELEASE_PAGES]) as api:
+            with self.assertRaisesRegex(ReleaseError, "page limit"):
+                self.github.get("v0.7.0")
+        self.assertEqual(api.call_count, MAX_RELEASE_PAGES + 1)
+
+    def test_release_id_lookup_uses_exact_authenticated_endpoint(self):
+        with patch.object(self.github, "api", return_value=self.draft) as api:
+            self.assertEqual(self.github.get_by_id(42), self.draft)
+        api.assert_called_once_with("GET", "/releases/42", missing=True)
+        for invalid in (True, 0, -1, "42", "42/other"):
+            with self.assertRaises(ReleaseError):
+                self.github.get_by_id(invalid)
 
 
 if __name__ == "__main__":

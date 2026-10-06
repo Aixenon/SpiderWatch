@@ -22,6 +22,8 @@ TAG = re.compile(r"^v(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8
 REPO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$")
 DIGEST = re.compile(r"^[a-f0-9]{64}$")
 MAX_BINARY = 16 * 1024 * 1024
+RELEASES_PER_PAGE = 20
+MAX_RELEASE_PAGES = 10
 PLATFORMS = json.loads((Path(__file__).resolve().parents[1] / "internal/agent/platforms.json").read_text())
 TARGETS = {(p["os"], p["arch"]) for p in PLATFORMS}
 
@@ -129,7 +131,30 @@ class GitHub:
             raise ReleaseError(f"GitHub API rejected release operation (HTTP {error.code})") from None
 
     def get(self, tag):
-        return self.api("GET", "/releases/tags/" + quote(tag, safe=""), missing=True)
+        release = self.api("GET", "/releases/tags/" + quote(tag, safe=""), missing=True)
+        if release is not None:
+            return release
+        # The tag endpoint can hide drafts, including a draft from a failed run.
+        # Authenticated listing exposes them; never select a different tag or
+        # create another draft when this bounded search is incomplete.
+        found = None
+        for page in range(1, MAX_RELEASE_PAGES + 1):
+            releases = self.api("GET", f"/releases?per_page={RELEASES_PER_PAGE}&page={page}")
+            if not isinstance(releases, list) or any(not isinstance(item, dict) for item in releases):
+                raise ReleaseError("GitHub returned an invalid release listing")
+            for item in releases:
+                if item.get("tag_name") == tag:
+                    if found is not None:
+                        raise ReleaseError("Multiple releases match this tag; review them manually")
+                    found = item
+            if len(releases) < RELEASES_PER_PAGE:
+                return found
+        raise ReleaseError("Release search exceeds its page limit; review existing drafts manually")
+
+    def get_by_id(self, release_id):
+        if type(release_id) is not int or release_id <= 0:
+            raise ReleaseError("GitHub release has no valid identifier")
+        return self.api("GET", f"/releases/{release_id}", missing=True)
 
     def create(self, tag, commit):
         return self.api("POST", "/releases", {"tag_name": tag, "target_commitish": commit, "name": tag, "draft": True, "prerelease": False, "generate_release_notes": True, "body": self.install_instructions(tag)})
@@ -191,6 +216,9 @@ def publish_release(github, tag, commit, assets):
     if existing is not None and not existing.get("draft"):
         raise ReleaseError("This tag is already published; bump the version instead of overwriting it")
     release = existing if existing is not None else github.create(tag, commit)
+    release_id = release.get("id")
+    if not release.get("draft") or type(release_id) is not int or release_id <= 0:
+        raise ReleaseError("GitHub did not return a valid draft")
     remote = verify_release_metadata(release, tag, commit, assets)
     # Validate any surviving partial upload before adding missing files. Existing
     # mismatched assets are never deleted or replaced, including on draft retries.
@@ -199,8 +227,8 @@ def publish_release(github, tag, commit, assets):
     for name, asset in assets.items():
         if name not in remote:
             github.upload(tag, asset)
-    complete = github.get(tag)
-    if not complete or not complete.get("draft") or complete.get("id") != release.get("id"):
+    complete = github.get_by_id(release_id)
+    if not complete or not complete.get("draft") or complete.get("id") != release_id:
         raise ReleaseError("Draft changed during publication; release not published")
     remote = verify_release_metadata(complete, tag, commit, assets)
     if set(remote) != set(assets):
