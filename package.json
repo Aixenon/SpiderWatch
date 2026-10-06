@@ -7,6 +7,7 @@
     "deploy": "npm --prefix worker run deploy --",
     "preview": "npm --prefix worker run preview",
     "build": "npm --prefix worker run build",
+    "build:clients": "node worker/scripts/build-clients.mjs",
     "check": "npm --prefix worker run check",
     "test:deploy": "npm --prefix worker run test:deploy"
   }

@@ -14,7 +14,7 @@
   "assets": {
     "directory": "./dist/panel",
     "binding": "ASSETS",
-    "run_worker_first": true
+    "run_worker_first": ["/*", "!/install.sh", "!/downloads/*"]
   },
   "durable_objects": {
     "bindings": [{"name": "MONITOR", "class_name": "MonitorGroup"}]

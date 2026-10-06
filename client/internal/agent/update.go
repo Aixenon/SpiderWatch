@@ -79,6 +79,9 @@ func (c *Client) updateURL(raw string, manifest bool) (*url.URL, error) {
 		return nil, errors.New("invalid update distribution URL")
 	}
 	parts := strings.Split(strings.TrimPrefix(u.Path, "/"), "/")
+	if !manifest && len(parts) == 2 && parts[0] == "downloads" && validAssetFile(parts[1]) {
+		return u, nil
+	}
 	if len(parts) < 4 || parts[0] != "v1" || parts[1] != "updates" {
 		return nil, errors.New("invalid update distribution path")
 	}
@@ -105,14 +108,17 @@ func (c *Client) updateRequest(ctx context.Context, endpoint string, timeout tim
 	if err != nil {
 		return nil, errors.New("invalid update request")
 	}
-	if err := c.authorizeRequest(req, nil); err != nil {
-		return nil, err
+	publicDownload := strings.HasPrefix(req.URL.Path, "/downloads/")
+	if !publicDownload {
+		if err := c.authorizeRequest(req, nil); err != nil {
+			return nil, err
+		}
+		req.Header.Set("X-Monitor-Update-Protocol", "2")
 	}
 	req.Header.Set("Accept", "application/json, application/octet-stream")
 	req.Header.Set("Accept-Encoding", "identity")
 	req.Header.Set("User-Agent", "spider-watch/update")
-	req.Header.Set("X-Monitor-Update-Protocol", "2")
-	if c.config.Access.ClientID != "" {
+	if !publicDownload && c.config.Access.ClientID != "" {
 		req.Header.Set("CF-Access-Client-Id", c.config.Access.ClientID)
 		req.Header.Set("CF-Access-Client-Secret", c.config.Access.ClientSecret)
 	}
@@ -209,6 +215,9 @@ func (c *Client) checkUpdate(ctx context.Context, current string, automatic bool
 			return plan, err
 		}
 		expected := strings.TrimSuffix(u.Path, "manifest.json") + manifest.Version + "/" + asset.SHA256 + "/" + asset.File
+		if strings.HasPrefix(assetURL.Path, "/downloads/") {
+			expected = "/downloads/" + asset.File
+		}
 		if assetURL.Path != expected {
 			return plan, errors.New("update asset does not match manifest path")
 		}

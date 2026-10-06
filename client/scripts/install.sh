@@ -42,10 +42,9 @@ if [ -n "$server" ] || [ -n "$join" ]; then
     *) die 'The server must use HTTPS.';;
   esac
   invitation=${server#*#invite=}
-  # The panel encodes the standard base64 signature for a URL fragment. Keep
-  # that encoding when putting the token in one path segment.
+  # Validate the invitation before installing; it is sent only by configure.
   printf '%s' "$invitation" | grep -Eq '^[a-f0-9]{32}\.[0-9]{13}\.([A-Za-z0-9]|%2[BbFf]){43}%3[Dd]$' || die 'Invalid invitation URL.'
-  worker_base=$origin/bootstrap/install/$invitation
+  worker_base=$origin/downloads
   download_redirects=0
   version=latest
 fi
@@ -141,7 +140,7 @@ if [ "$version" = latest ]; then
   printf '%s' "$number" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || die 'Invalid release version.'
   version=v$number
 fi
-if [ -n "$worker_base" ]; then base=$worker_base/${version#v}
+if [ -n "$worker_base" ]; then base=$worker_base
 else base=https://github.com/$repo/releases/download/$version; fi
 download "$base/checksums.txt" "$stage/checksums" 16384
 expected=$(awk -v name="$artifact" '$2==name {print $1}' "$stage/checksums")

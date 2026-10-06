@@ -6,7 +6,7 @@ export const DAY_SECONDS = 86400;
 // account aggregate. Values use decimal GB, as Cloudflare does.
 export const FREE_LIMITS = { worker_requests: 100000, do_requests: 100000, do_gb_seconds: 13000, sql_read: 5000000, sql_written: 100000, storage_bytes: 1_000_000_000, account_storage_bytes: 5_000_000_000 };
 export const UPDATE_DISTRIBUTION_LIMITS = { file_bytes: 16 * 1024 * 1024, static_asset_bytes: 25 * 1024 * 1024 };
-export const UPDATE_USAGE_NOTE = "安装包与面板一起部署到 Workers 静态资源。检查更新和受保护的下载经过 Worker，DO 只校验设备权限和读取配置，二进制直接从静态资源流式返回；不写入 DO，不在运行时请求 GitHub。更新开销与监控采样频率无关。";
+export const UPDATE_USAGE_NOTE = "安装包与面板一起部署到 Workers 静态资源，固定下载地址公开访问，直接由静态资源返回，不经过 Worker 和 DO。设备检查更新和读取更新清单仍验证设备权限；注册仍要求有效邀请。更新开销与监控采样频率无关。";
 export const PRICING_AS_OF = "2026-10-06";
 export type Counts = { fast_messages: number; idle_messages: number; other_messages: number; connections: number; viewer_connections: number; http_requests: number; alarms: number; sql_read: number; sql_written: number; handler_ms: number; device_seconds: number; view_seconds: number };
 export type HourUsage = Counts & { hour: number };

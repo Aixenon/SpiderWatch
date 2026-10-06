@@ -25,7 +25,7 @@ if ($Server -or $Join) {
     }
     # Preserve the original authority: Windows PowerShell expands IPv6 ::1
     # when GetLeftPart is used, while the panel and client keep the short form.
-    $taskWorkerBase = $Server.Substring(0, $Server.IndexOf('#')).TrimEnd('/') + '/bootstrap/install/' + $taskServerUri.Fragment.Substring(8)
+    $taskWorkerBase = $Server.Substring(0, $Server.IndexOf('#')).TrimEnd('/') + '/downloads'
     $taskRedirects = 0
     if ($taskServerUri.Scheme -eq 'http') { $taskProtocols = '=http,https' }
     $taskIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -57,7 +57,7 @@ try {
         if ($LASTEXITCODE) { throw 'Cannot read the deployed client version.' }
         $taskCurrent = Get-Content -LiteralPath $taskManifest -Raw | ConvertFrom-Json
         if ($taskCurrent.schema -ne 1 -or $taskCurrent.version -isnot [string] -or $taskCurrent.version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+\z') { throw 'Invalid deployed client version.' }
-        $taskBase = $taskWorkerBase + '/' + $taskCurrent.version
+        $taskBase = $taskWorkerBase
     }
     & curl.exe --proto $taskProtocols --proto-redir $taskProtocols -fLsS --max-redirs $taskRedirects --max-filesize 16384 --connect-timeout 10 --max-time 120 ($taskBase+'/checksums.txt') -o $taskChecksums
     if ($LASTEXITCODE) { throw 'Cannot download release checksums.' }
@@ -66,8 +66,10 @@ try {
     $taskHash = $taskMatches[0].Substring(0,64)
     & curl.exe --proto $taskProtocols --proto-redir $taskProtocols -fLsS --max-redirs $taskRedirects --max-filesize 26214400 --connect-timeout 10 --max-time 180 ($taskBase+'/'+$taskName) -o $taskSetup
     if ($LASTEXITCODE -or (Get-FileHash -LiteralPath $taskSetup -Algorithm SHA256).Hash -ne $taskHash) { throw 'Installer download or checksum verification failed.' }
-    $taskArguments = if ($Silent) { '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-' } else { '/NORESTART' }
-    $taskProcess = Start-Process -FilePath $taskSetup -ArgumentList $taskArguments -Verb RunAs -WindowStyle Hidden -Wait -PassThru
+    $taskStartParameters = @{FilePath=$taskSetup; Verb='RunAs'; Wait=$true; PassThru=$true}
+    if ($Silent) { $taskStartParameters.ArgumentList = '/S'; $taskStartParameters.WindowStyle = 'Hidden' }
+    else { $taskStartParameters.WindowStyle = 'Normal' }
+    $taskProcess = Start-Process @taskStartParameters
     if ($taskProcess.ExitCode -ne 0) { throw ('Installer failed: ' + $taskProcess.ExitCode) }
     if ($Server) {
         # Use the native Program Files path even from 32-bit PowerShell, without

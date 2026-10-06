@@ -2,7 +2,7 @@ param([ValidateSet('Install','Remove')][string]$Action = 'Install')
 $ErrorActionPreference = 'Stop'
 
 function Initialize-MaintenanceEnvironment {
-    # Inno is an intermediate process: Windows PowerShell can inherit PS7's
+    # Setup is an intermediate process: Windows PowerShell can inherit PS7's
     # module paths instead of rebuilding its own. Load only the native modules.
     if ($PSVersionTable.PSEdition -ne 'Desktop') { throw 'Windows PowerShell is required for service maintenance' }
     $taskModules = [IO.Path]::Combine($PSHOME, 'Modules')

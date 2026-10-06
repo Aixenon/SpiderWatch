@@ -152,7 +152,7 @@ test('keeps dashboard-managed settings out of the upload and preserves durable b
   assert.equal(config.vars.MONITOR_GROUP, original.vars.MONITOR_GROUP);
   assert.deepEqual(config.durable_objects, original.durable_objects);
   assert.deepEqual(config.migrations, original.migrations);
-  assert.equal(config.assets.run_worker_first, true);
+  assert.deepEqual(config.assets.run_worker_first, ['/*', '!/install.sh', '!/downloads/*']);
   assert.equal(config.main, resolve(root, source.main));
   assert.equal(config.assets.directory, resolve(root, source.assets.directory));
   assert.ok(isAbsolute(config.main) && isAbsolute(config.assets.directory));
@@ -171,8 +171,8 @@ test('uses explicit source URL switches and defaults omitted switches to disable
   }
 });
 
-function fakeDeployment({ secrets = [{ name: 'INVITATION_SECRET' }, { name: 'SESSION_SECRET' }], exists = true, workersDev = false, previews = false, status = 0, error, authError = false, apiStatus = 200, panelStatus = 0 } = {}) {
-  const calls = [], uploads = [], logs = [], panelBuilds = [];
+function fakeDeployment({ secrets = [{ name: 'INVITATION_SECRET' }, { name: 'SESSION_SECRET' }], exists = true, workersDev = false, previews = false, status = 0, error, authError = false, apiStatus = 200, panelStatus = 0, clientStatus = 0, name = 'spider-watch' } = {}) {
+  const calls = [], uploads = [], logs = [], panelBuilds = [], clientBuilds = [];
   mock.method(console, 'log', value => logs.push(String(value)));
   mock.method(childProcess, 'execFileSync', (command, args) => {
     calls.push([command, args]);
@@ -183,12 +183,17 @@ function fakeDeployment({ secrets = [{ name: 'INVITATION_SECRET' }, { name: 'SES
     throw new Error('Unexpected credential command');
   });
   const request = mock.method(globalThis, 'fetch', async url => {
-    assert.ok(url.startsWith(`https://api.cloudflare.com/client/v4/accounts/${account}/workers/scripts/spider-watch/`));
+    assert.ok(url.startsWith(`https://api.cloudflare.com/client/v4/accounts/${account}/workers/scripts/${name}/`));
     if (apiStatus !== 200) return Response.json({ success: false, errors: [{ code: 10000 }] }, { status: apiStatus });
     if (!exists) return Response.json({ success: false, errors: [{ code: 10007 }] }, { status: 404 });
     return url.endsWith('/secrets') ? success(secrets) : success({ enabled: workersDev, previews_enabled: previews });
   });
   const deploy = mock.method(childProcess, 'spawnSync', (_command, args) => {
+    if (args[0].endsWith('build-clients.mjs')) {
+      assert.equal(request.mock.callCount(), 0);
+      clientBuilds.push(args);
+      return { status: clientStatus };
+    }
     if (args[0].includes('vue-tsc') || args[0].endsWith('vite.js')) {
       panelBuilds.push(args);
       return { status: panelStatus };
@@ -202,8 +207,34 @@ function fakeDeployment({ secrets = [{ name: 'INVITATION_SECRET' }, { name: 'SES
     return { status, error };
   });
   syncBuiltinESMExports();
-  return { calls, uploads, logs, request, deploy, panelBuilds };
+  return { calls, uploads, logs, request, deploy, panelBuilds, clientBuilds };
 }
+
+test('Workers Builds compiles the checkout and preserves the injected existing Worker name', async () => {
+  const fixture = fakeDeployment({ name: 'existing-monitor' });
+  await main([], { WORKERS_CI: '1', WORKERS_CI_COMMIT_SHA: 'a'.repeat(40), GITHUB_SHA: 'b'.repeat(40),
+    WRANGLER_CI_OVERRIDE_NAME: 'existing-monitor', WORKER_NAME: 'ignored-name', GITHUB_REPOSITORY: 'fixture/SpiderWatch' });
+  assert.deepEqual(fixture.clientBuilds, [[resolve(root, 'scripts/build-clients.mjs'), '--repository', 'fixture/SpiderWatch',
+    '--revision', 'a'.repeat(40), '--output', releaseDirectory]]);
+  assert.equal(fixture.uploads[0].config.name, 'existing-monitor');
+  assert.equal(fixture.uploads[0].secrets, undefined);
+});
+
+test('a failed Cloudflare client build stops before authentication or deployment', async () => {
+  const fixture = fakeDeployment({ clientStatus: 1 });
+  await assert.rejects(main([], { WORKERS_CI: '1', GITHUB_REPOSITORY: 'fixture/SpiderWatch' }), /Client build failed/);
+  assert.equal(fixture.request.mock.callCount(), 0);
+  assert.equal(fixture.uploads.length, 0);
+  assert.equal(fixture.panelBuilds.length, 0);
+});
+
+test('explicit local client builds also work in dry-run mode without Cloudflare credentials', async () => {
+  const fixture = fakeDeployment();
+  await main(['--dry-run', '--build-clients'], { GITHUB_REPOSITORY: 'fixture/SpiderWatch' });
+  assert.equal(fixture.clientBuilds.length, 1);
+  assert.equal(fixture.request.mock.callCount(), 0);
+  assert.equal(fixture.uploads.length, 1);
+});
 
 test('redeployment keeps existing credentials and removes only its temporary deployment directory', async () => {
   const fixture = fakeDeployment();
@@ -211,7 +242,7 @@ test('redeployment keeps existing credentials and removes only its temporary dep
   assert.equal(fixture.uploads.length, 1);
   assert.equal(fixture.panelBuilds.length, 2);
   assert.equal(fixture.uploads[0].config.assets.directory, assetsDirectory);
-  const packaged = JSON.parse(readFileSync(resolve(assetsDirectory, '_downloads/current.json'), 'utf8'));
+  const packaged = JSON.parse(readFileSync(resolve(assetsDirectory, 'downloads/current.json'), 'utf8'));
   assert.equal(packaged.files.length, 27);
   assert.equal(packaged.revision, 'a'.repeat(40));
   const upload = fixture.uploads[0];

@@ -6,23 +6,26 @@ Cloudflare Workers + SQLite Durable Objects 网络监控面板，配套单文件
 
 ## 部署到 Cloudflare
 
-需要一个 Cloudflare 账户、托管在该账户下的域名和包含本项目完整源码的 GitHub 仓库。GitHub Actions 编译客户端后，将面板、Worker 和全部平台安装文件一起部署。面板使用 GitHub 登录，无需开通 Zero Trust。默认使用自定义域名，关闭 `workers.dev` 和预览地址。
+需要一个 Cloudflare 账户、托管在该账户下的域名和包含本项目完整源码的 GitHub 仓库。Cloudflare 拉取源码后自动编译客户端，再将面板、Worker 和全部平台安装文件一起部署。面板使用 GitHub 登录，无需开通 Zero Trust。默认使用自定义域名，关闭 `workers.dev` 和预览地址。
 
 源码仓库可以保持私有。首次安装和设备更新均从自己的 Worker 下载，无需公开 GitHub Release，也不使用 R2。
 
 ### 1. 配置自动部署
 
-在 Cloudflare 创建使用 **Edit Cloudflare Workers** 模板的 API Token，权限范围只选择用于部署的账户。在 GitHub 仓库的 **Settings → Secrets and variables → Actions** 配置：
+在 Cloudflare **Workers & Pages → Create → Import a repository** 连接 GitHub 仓库，允许 Cloudflare 读取该私有仓库。已有 Worker 直接保留原仓库连接，在 **Settings → Builds** 检查以下配置：
 
-| 位置 | 名称 | 内容 |
-|---|---|---|
-| Secrets | `CLOUDFLARE_API_TOKEN` | 上述部署 Token |
-| Variables | `CLOUDFLARE_ACCOUNT_ID` | Cloudflare 账户 ID |
-| Variables | `WORKER_NAME` | Worker 名称，默认 `spider-watch`；迁移已有面板时填写原名称 |
+| 配置 | 内容 |
+|---|---|
+| 根目录 | `/` |
+| 构建命令 | 留空 |
+| 部署命令 | `npm run deploy` |
+| 非生产分支部署命令（必填时） | `npm run preview` |
+| 生产分支 | 仓库默认分支，例如 `main` |
+| 非生产分支自动构建 | 关闭 |
 
-Token 只保存在 GitHub Secret 中，不写入源码。仓库名和源码提交会在编译时自动识别，Fork 后无需修改下载地址。已使用 Cloudflare Workers Builds 的项目，请在原 Worker 的构建设置中断开自动构建连接，避免两条发布流程同时运行。
+使用 Cloudflare 自动生成的构建部署凭据，无需在 GitHub 新增 Cloudflare Secret。仓库名、源码提交和当前 Worker 名称自动识别，Fork 后无需修改下载地址。已有面板继续使用原 Worker 名称。
 
-打开仓库 **Actions → SpiderWatch builds → Run workflow**，选择默认分支运行；之后推送到默认分支会自动触发。19 个平台二进制、3 个 Windows 安装包与脚本全部生成并校验成功后，才部署同一提交的面板、Worker 和静态文件。任何编译或校验失败都不发布。Pull Request 和其他分支只编译，不部署生产环境。
+点击部署，之后推送到生产分支会自动触发。Cloudflare 的 Linux 构建环境交叉编译 19 个平台二进制，并用 NSIS 生成 3 个 Windows 安装包。全部文件生成并通过完整性校验后，才部署同一提交的面板、Worker 和静态文件；失败时保留当前线上版本。编译工具固定版本并校验 SHA-256，不需要 Wine 或管理员安装权限。
 
 部署脚本自动创建 SQLite Durable Object 绑定，并补齐注册邀请密钥和会话签名密钥；后续部署保留已有密钥与设置。
 
@@ -56,7 +59,7 @@ Token 只保存在 GitHub Secret 中，不写入源码。仓库名和源码提�
 
 保持 Worker 名称和 `MONITOR_GROUP` 不变，设备身份与设置会保留。每次默认分支发布都会同步全部客户端静态文件，创建 GitHub Release 是可选的归档步骤。
 
-本地部署备选（Node.js 22 或更新版本）：先将本次 **SpiderWatch builds** 的 `spider-watch-release` 产物解压到 `client/dist`，再执行：
+本地部署备选（Node.js 22 或更新版本）：先将同一提交的 **SpiderWatch builds** 的 `spider-watch-release` 产物解压到 `client/dist`，再执行：
 
 ```sh
 cd worker
@@ -66,6 +69,8 @@ npm run deploy
 ```
 
 本地部署使用同一流程；缺少平台、文件校验失败或产物不属于当前提交时会拒绝发布，避免清空已上线的安装文件。多账户环境需指定 `CLOUDFLARE_ACCOUNT_ID`，已有非默认名称的 Worker 需指定 `WORKER_NAME`。域名和 GitHub 登录配置仍在 Cloudflare 控制台管理。
+
+Linux 上已安装 Go、Python 3、C++ 编译工具和 zlib 开发库时，也可在仓库根目录运行 `npm run build:clients` 编译全部客户端。GitHub Actions 使用同一入口做多平台检查、Windows 安装卸载验证及可选 Release 发布，不参与 Cloudflare 部署。
 
 ## 发布与安装客户端
 
@@ -93,7 +98,7 @@ Windows 要求 Windows 10 / Server 2016 或更新版本；macOS 要求 macOS 13 
 curl -fsS --connect-timeout 10 --max-time 120 'https://monitor.example.com/install.sh' | sh -s -- --server '面板提供的完整邀请地址' --join 网络代码
 ```
 
-- **Windows**：登录面板后下载对应架构的 `spider-watch-windows-架构-setup.exe`，运行安装向导。默认安装到 `C:\Program Files\SpiderWatch`，注册开机服务和更新任务，添加命令到 PATH。安装后新开管理员终端执行加入指令。
+- **Windows**：下载对应架构的 `spider-watch-windows-架构-setup.exe`，运行安装向导。固定地址为 `https://你的面板域名/downloads/spider-watch-windows-架构-setup.exe`，下载无需登录。默认安装到 `C:\Program Files\SpiderWatch`，注册开机服务和更新任务，添加命令到 PATH。安装后新开管理员终端执行加入指令。
 - **Linux / macOS**：复制弹窗中的 `curl` 命令，下载脚本后自动安装并使用本次邀请加入。非 root 用户会通过 sudo 安装。同一个脚本识别系统和架构，并适配 systemd、OpenRC、procd 或 launchd。程序位于 `/opt/spider-watch/spider-watch`，命令链接位于 `/usr/local/bin/spider-watch`。需要 curl、CA 证书和 SHA-256 校验工具。
 - **手动运行**：直接下载对应的单个二进制。Unix 安装脚本可加 `--no-service --prefix "$HOME/.local/bin"`；也可用 `--arch` 指定清单中的架构。没有支持的服务管理器时，脚本会说明原因，不假装完成开机启动。
 
@@ -109,7 +114,7 @@ spider-watch configure --server "面板提供的完整邀请地址" --join 网�
 
 设备配置中可设置名称、分组、图标和自动更新。自动更新由系统每 6 小时检查一次；手动可执行 `spider-watch --update`，Unix 使用 sudo，Windows 使用管理员终端。检查但不安装：`spider-watch update --check`。OpenRC/procd 的自动更新需要正在运行的 cron 服务。
 
-安装脚本公开可读，首次安装的文件下载需有效且未使用的邀请，成功加入后邀请立即关闭。Windows 面板下载需有效登录；后续更新仅允许已注册设备使用签名请求。所有安装和更新文件来自本次部署的 Worker 静态资源，客户端校验版本、大小和 SHA-256 后替换。文件流不经过 DO 存储，也不在下载时请求 GitHub；鉴权请求仍会消耗 Worker 和相应的 DO 调用。没有额外常驻更新进程。
+安装脚本和 `/downloads/` 下的编译文件均公开下载，固定地址随部署更新。它们由 Workers 静态资源直接返回，不进入 Worker 代码，也不调用 DO；下载不携带设备密钥或邀请码。设备注册仍需一次性邀请，更新检查仍验证已注册身份与自动更新设置。客户端校验版本、大小和 SHA-256 后替换；部署期间文件变化导致校验不一致时停止安装，可稍后重试。旧客户端的签名下载地址保留兼容。没有额外常驻更新进程。
 
 Windows 可在 **设置 → 应用 → SpiderWatch → 卸载** 移除程序、服务和更新任务。卸载保留 `%ProgramData%\spider-watch\state` 中的设备身份，以便重装复用；永久撤销设备请同时在面板删除。Unix 身份位于 `/var/lib/spider-watch/state`。
 
@@ -127,4 +132,4 @@ Windows 可在 **设置 → 应用 → SpiderWatch → 卸载** 移除程序、�
 
 macOS 的物理归属及 APFS 容器容量最多缓存 5 分钟，每卷数据仍随正常采样更新。
 
-参考：[GitHub OAuth 应用](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/creating-an-oauth-app)、[GitHub 登录流程](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps)、[GitHub Actions 部署 Worker](https://developers.cloudflare.com/workers/ci-cd/external-cicd/github-actions/)、[部署时上传 Secret](https://developers.cloudflare.com/workers/configuration/secrets/)。
+参考：[GitHub OAuth 应用](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/creating-an-oauth-app)、[GitHub 登录流程](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps)、[Cloudflare Workers Builds](https://developers.cloudflare.com/workers/ci-cd/builds/)、[部署时上传 Secret](https://developers.cloudflare.com/workers/configuration/secrets/)。

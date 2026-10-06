@@ -218,6 +218,33 @@ func TestUpdateDownloadStreamsAndRejectsWrongSizeOrDigest(t *testing.T) {
 	}
 }
 
+func TestPublicUpdateDownloadUsesFixedURLWithoutDeviceCredentials(t *testing.T) {
+	payload := []byte(strings.Repeat("public-client-build", 128))
+	client, config, _ := tlsTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for name := range r.Header {
+			if strings.HasPrefix(strings.ToLower(name), "x-monitor-") || strings.HasPrefix(strings.ToLower(name), "cf-access-") || strings.EqualFold(name, "Authorization") {
+				t.Errorf("public static download sent device credential header: %s", name)
+			}
+		}
+		_, _ = w.Write(payload)
+	}))
+	defer client.Close()
+	file, err := os.CreateTemp(t.TempDir(), "download")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	asset := UpdateAsset{File: "spider-watch-windows-amd64.exe", Bytes: int64(len(payload)), SHA256: fmt.Sprintf("%x", sha256.Sum256(payload)), URL: config.Server + "/downloads/spider-watch-windows-amd64.exe"}
+	if err := client.DownloadUpdate(context.Background(), asset, file); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/downloads/install.sh", "/downloads/other.exe", "/downloads/nested/spider-watch-windows-amd64.exe", "/downloads/spider-watch-windows-amd64.exe?redirect=1"} {
+		if _, err := client.updateURL(config.Server+path, false); err == nil {
+			t.Fatalf("accepted invalid public asset path %s", path)
+		}
+	}
+}
+
 func TestUpdateRollbackRestoresOldBinaryOnFailedSelfCheckOrServiceStart(t *testing.T) {
 	for _, scenario := range []string{"success", "self-check", "service"} {
 		t.Run(scenario, func(t *testing.T) {

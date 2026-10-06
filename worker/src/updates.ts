@@ -38,7 +38,7 @@ function publicConfig({ config, source }: UpdateState, env: Env, origin: string)
 }
 function publicManifest(release: UpdateRelease, origin: string, path: string, revision: boolean) {
   return { schema: 1, version: release.version, ...(revision ? { revision: release.revision } : {}), release_tag: release.release_tag,
-    assets: release.assets.map(asset => ({ ...asset, url: `${origin}/v1/updates/${path}/${release.version}/${asset.sha256}/${asset.file}` })) };
+    assets: release.assets.map(asset => ({ ...asset, url: revision ? `${origin}/downloads/${asset.file}` : `${origin}/v1/updates/${path}/${release.version}/${asset.sha256}/${asset.file}` })) };
 }
 
 /** Panel session and admin Origin are checked by index.ts before this handler. */

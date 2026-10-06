@@ -49,14 +49,14 @@ const FILES = new Set([
 ]);
 export function bundledFilePath(version: string, file: string): string {
   if (!VERSION.test(version) || !FILES.has(file)) throw new UpdateSourceError("update_not_found", 404);
-  return `/_downloads/${version}/${file}`;
+  return `/downloads/${file}`;
 }
 /** ASSETS is the immutable bundle uploaded alongside this Worker version. */
 export async function bundledAsset(env: Env, path: string, method = "GET"): Promise<Response> {
   return env.ASSETS.fetch(new Request(`https://assets.internal${path}`, { method, headers: { "Accept-Encoding": "identity" } }));
 }
 export async function readBundledRelease(env: Env): Promise<BundledRelease> {
-  const response = await bundledAsset(env, "/_downloads/current.json");
+  const response = await bundledAsset(env, "/downloads/current.json");
   if (response.status !== 200) { await response.body?.cancel(); throw new UpdateSourceError("update_bundle_unavailable", 503); }
   const manifest = object(await readUpdateJSON(response, 64 * 1024));
   if (manifest.schema !== 1 || typeof manifest.version !== "string" || !VERSION.test(manifest.version)
@@ -97,6 +97,6 @@ export async function streamBundledFile(env: Env, version: string, file: Downloa
   return new Response(body, { headers: {
     "Content-Type": file.file.endsWith(".json") ? "application/json" : file.file === "install.sh" ? "text/x-shellscript; charset=utf-8" : "application/octet-stream",
     "Content-Length": String(file.bytes), "Content-Disposition": `attachment; filename="${file.file}"`,
-    ETag: `"${file.sha256}"`, "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer",
+    ETag: `"${file.sha256}"`, "Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer",
   } });
 }

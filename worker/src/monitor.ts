@@ -371,12 +371,6 @@ export class MonitorGroup extends DurableObject<Env> {
     if (!upgrade) this.counter().http_requests++;
     this.duration.begin(started);
     try {
-      if (request.headers.get("X-Monitor-Role") === "install") {
-        if (url.hostname !== "do" || url.pathname !== "/internal/install-authorize" || request.method !== "GET") return json({code:"not_found"},404);
-        const id = request.headers.get("X-Monitor-Invitation-ID") || "";
-        if (!/^[a-f0-9]{32}$/.test(id) || !this.query("SELECT id FROM invitations WHERE id=? AND expires_at>? AND node_id IS NULL", id, Date.now()).length) return json({code:"registration_closed"},403);
-        return json({ authorized: true });
-      }
       if (request.headers.get("X-Monitor-Role") === "updates") {
         if (url.hostname !== "do") return json({code:"not_found"},404);
         const original = request.headers.get("X-Monitor-Original-URL");

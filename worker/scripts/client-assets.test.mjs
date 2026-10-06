@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, test } from 'node:test';
-import { mkdtemp, readFile, rm, truncate, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, truncate, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { packageClientAssets, verifyClientRelease } from './client-assets.mjs';
@@ -18,10 +18,12 @@ test('packages all 19 binaries, three installers and metadata with reproducible 
   const current = await packageClientAssets(release, output, { repository: 'fixture/SpiderWatch', revision: 'a'.repeat(40) });
   assert.equal(current.assets.length, 19); assert.equal(current.files.length, 27);
   assert.equal(current.revision, 'a'.repeat(40)); assert.match(current.build, /^[a-f0-9]{64}$/);
-  assert.deepEqual(JSON.parse(await readFile(resolve(output, '_downloads/current.json'), 'utf8')), current);
+  assert.deepEqual(JSON.parse(await readFile(resolve(output, 'downloads/current.json'), 'utf8')), current);
   assert.equal(await readFile(resolve(output, 'install.sh'), 'utf8'), await readFile(resolve(release, 'install.sh'), 'utf8'));
   assert.deepEqual(await verifyClientRelease(release), current);
-  for (const file of current.files) assert.deepEqual(await readFile(resolve(output, '_downloads/0.7.1', file.file)), await readFile(resolve(release, file.file)));
+  for (const file of current.files) assert.deepEqual(await readFile(resolve(output, 'downloads', file.file)), await readFile(resolve(release, file.file)));
+  assert.deepEqual((await readdir(output)).sort(), ['downloads', 'install.sh']);
+  assert.equal((await readdir(resolve(output, 'downloads'))).length, 28);
 });
 
 test('refuses incomplete builds, mismatched repositories and stale commits', async () => {
@@ -29,7 +31,7 @@ test('refuses incomplete builds, mismatched repositories and stale commits', asy
   await assert.rejects(verifyClientRelease(release, { revision: 'b'.repeat(40) }), /different source commit/);
   await rm(resolve(release, 'spider-watch-windows-arm64-setup.exe'));
   await assert.rejects(packageClientAssets(release, output), /Missing client artifact/);
-  await assert.rejects(readFile(resolve(output, '_downloads/current.json')), /ENOENT/);
+  await assert.rejects(readFile(resolve(output, 'downloads/current.json')), /ENOENT/);
 });
 
 test('rejects changed binaries, checksums and incomplete or duplicate platform lists', async () => {
@@ -51,7 +53,7 @@ test('rejects changed binaries, checksums and incomplete or duplicate platform l
 test('enforces the Worker static asset size limit before copying any files', async () => {
   await truncate(resolve(release, 'spider-watch-windows-amd64-setup.exe'), 25 * 1024 * 1024 + 1);
   await assert.rejects(packageClientAssets(release, output), /Invalid client artifact size/);
-  await assert.rejects(readFile(resolve(output, '_downloads/current.json')), /ENOENT/);
+  await assert.rejects(readFile(resolve(output, 'downloads/current.json')), /ENOENT/);
 });
 
 test('requires stable versions, matching revisions and canonical filenames', async () => {

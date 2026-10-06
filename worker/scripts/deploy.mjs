@@ -124,10 +124,10 @@ function wranglerJSON(args) {
 }
 
 export async function main(args = process.argv.slice(2), env = process.env, { assetsDirectory } = {}) {
-  if (args.some(arg => arg !== '--dry-run')) throw new Error('Usage: npm run deploy [-- --dry-run]');
+  if (args.some(arg => !['--dry-run', '--build-clients'].includes(arg))) throw new Error('Usage: npm run deploy [-- --dry-run] [--build-clients]');
   const dry = args.includes('--dry-run');
   const source = JSON.parse(await readFile(resolve(root, 'wrangler.jsonc'), 'utf8'));
-  const name = env.WORKER_NAME || source.name;
+  const name = env.WRANGLER_CI_OVERRIDE_NAME || env.WORKER_NAME || source.name;
   if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(name)) throw new Error('Invalid WORKER_NAME.');
   let remote = '';
   try {
@@ -136,7 +136,7 @@ export async function main(args = process.argv.slice(2), env = process.env, { as
     }).trim();
   } catch {}
   const repository = identifyRepository(env, remote);
-  let revision = env.GITHUB_SHA;
+  let revision = env.WORKERS_CI_COMMIT_SHA || env.GITHUB_SHA;
   if (!revision) {
     try {
       revision = execFileSync('git', ['rev-parse', 'HEAD'], {
@@ -148,6 +148,11 @@ export async function main(args = process.argv.slice(2), env = process.env, { as
   // Refuse incomplete checkouts before contacting Cloudflare or touching a live deployment.
   const releaseDirectory = resolve(env.SPIDER_RELEASE_DIR || resolve(root, '../client/dist'));
   const releaseOptions = { repository, revision };
+  if (env.WORKERS_CI === '1' || args.includes('--build-clients')) {
+    const clients = spawnSync(process.execPath, [resolve(root, 'scripts/build-clients.mjs'),
+      '--repository', repository, '--revision', revision, '--output', releaseDirectory], { cwd: root, stdio: 'inherit', env });
+    if (clients.error || clients.status !== 0) throw new Error('Client build failed; the current deployment was not changed.');
+  }
   const release = await verifyClientRelease(releaseDirectory, releaseOptions);
   let account;
   let state = { exists: false, hasInvitation: false, hasSession: false, workersDev: false, previews: false };

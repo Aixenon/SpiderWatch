@@ -26,7 +26,7 @@ ${command}
 describe("device installation commands", () => {
   it("offers all Windows installers and install.sh on the panel's own Worker", () => {
     const commands = installCommands(target);
-    const base = "https://monitor.example.com/panel/downloads";
+    const base = "https://monitor.example.com/downloads";
     expect(commands.windows).toEqual([
       { label: "x64", url: `${base}/spider-watch-windows-amd64-setup.exe` },
       { label: "ARM64", url: `${base}/spider-watch-windows-arm64-setup.exe` },

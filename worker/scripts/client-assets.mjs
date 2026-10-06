@@ -69,7 +69,7 @@ export async function verifyClientRelease(directory, { repository, revision } = 
 
 export async function packageClientAssets(directory, assetsDirectory, options = {}) {
   const manifest = await verifyClientRelease(directory, options);
-  const destination = resolve(assetsDirectory, '_downloads', manifest.version);
+  const destination = resolve(assetsDirectory, 'downloads');
   await mkdir(destination, { recursive: true });
   for (const file of manifest.files) {
     await copyFile(resolve(directory, file.file), resolve(destination, file.file));
@@ -77,6 +77,6 @@ export async function packageClientAssets(directory, assetsDirectory, options = 
     if (copied.bytes !== file.bytes || copied.sha256 !== file.sha256) throw new Error(`Client artifact changed during packaging: ${file.file}`);
   }
   await copyFile(resolve(destination, 'install.sh'), resolve(assetsDirectory, 'install.sh'));
-  await writeFile(resolve(assetsDirectory, '_downloads/current.json'), JSON.stringify(manifest) + '\n');
+  await writeFile(resolve(destination, 'current.json'), JSON.stringify(manifest) + '\n');
   return manifest;
 }

@@ -2,7 +2,7 @@ import { authorize, handleLogin } from "./auth";
 import { json } from "./model";
 import { handleUpdates, isUpdatePath } from "./updates";
 import { signedHeadersValid, verifyInvitation } from "./identity";
-import { handleInstallDownload, handlePanelDownload, isInstallPath } from "./install-downloads";
+import { handleInstallDownload, isInstallPath } from "./install-downloads";
 import { panelAuthFailure } from "./panel-auth";
 export { MonitorGroup } from "./monitor";
 
@@ -101,7 +101,6 @@ export default {
     }
     if (request.method === "GET" && (url.pathname === "/v1/live" || /^\/v1\/nodes\/[a-f0-9]{32}\/status$/.test(url.pathname))
       && !hasDeviceCredentials(request)) return json({ code: "device_auth_required" }, 401);
-    if (panel && url.pathname.startsWith("/downloads/")) return handlePanelDownload(request, env);
     if (!bootstrap && !agent && !url.pathname.startsWith("/api/")) {
       if (mutation) return json({ code: "method_not_allowed" }, 405);
       return panelAsset(request, env);

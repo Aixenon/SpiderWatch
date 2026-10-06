@@ -49,13 +49,13 @@ curl() {
     https://github.com/owner/fork/releases/download/v1.2.3/checksums.txt) cp "$TEST_FIXTURES/checksums" "$target";;
     https://github.com/owner/fork/releases/download/v1.2.3/spider-watch-linux-amd64) cp "$TEST_FIXTURES/binary" "$target";;
     https://monitor.example.test/install.sh) cp "$TEST_INSTALLER" "$target";;
-    https://monitor.example.test/bootstrap/install/*|http://127.0.0.1/bootstrap/install/*|http://\[::1\]:8788/bootstrap/install/*)
+    https://monitor.example.test/downloads/*|http://127.0.0.1/downloads/*|http://\[::1\]:8788/downloads/*)
       [ "$redirects" = 0 ] || return 93
       case "$url" in http://*) [ "$protocols" = '=http,https' ] || return 94;; *) [ "$protocols" = '=https' ] || return 95;; esac
       case "$url" in
         */current.json) cp "$TEST_FIXTURES/manifest" "$target";;
-        */1.2.3/checksums.txt) cp "$TEST_FIXTURES/checksums" "$target";;
-        */1.2.3/spider-watch-linux-amd64) cp "$TEST_FIXTURES/binary" "$target";;
+        */downloads/checksums.txt) cp "$TEST_FIXTURES/checksums" "$target";;
+        */downloads/spider-watch-linux-amd64) cp "$TEST_FIXTURES/binary" "$target";;
         *) return 92;;
       esac;;
     *) printf 'Unexpected download URL\n' >&2; return 91;;
@@ -97,9 +97,10 @@ script=$TEST_INSTALLER
         result, args = self.install()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(args, ['configure', '--server', SERVER, '--join', NETWORK])
-        base = 'https://monitor.example.test/bootstrap/install/' + TOKEN
-        self.assertEqual(self.downloads, [base + '/current.json', base + '/1.2.3/checksums.txt',
-                                         base + '/1.2.3/spider-watch-linux-amd64'])
+        base = 'https://monitor.example.test/downloads'
+        self.assertEqual(self.downloads, [base + '/current.json', base + '/checksums.txt',
+                                         base + '/spider-watch-linux-amd64'])
+        self.assertTrue(all(TOKEN not in url and 'invite' not in url for url in self.downloads))
 
     def test_failed_registration_does_not_report_installation_success(self):
         result, _ = self.install(registration_exit=23)
@@ -184,10 +185,10 @@ catch { Write-Output 'RESULT:{"failed":true}' }
 
     def test_panel_invitation_selects_worker_origin_without_redirects(self):
         result = self.download_source()
-        self.assertEqual(result, {'base': 'https://monitor.example.test/bootstrap/install/' + TOKEN,
+        self.assertEqual(result, {'base': 'https://monitor.example.test/downloads',
                                   'protocols': '=https', 'redirects': 0})
         result = self.download_source('http://[::1]:8788/#invite=' + TOKEN, local=True)
-        self.assertEqual(result['base'], 'http://[::1]:8788/bootstrap/install/' + TOKEN)
+        self.assertEqual(result['base'], 'http://[::1]:8788/downloads')
         self.assertEqual(result['protocols'], '=http,https')
 
     def test_invalid_windows_download_origins_are_rejected(self):

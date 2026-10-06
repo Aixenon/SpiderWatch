@@ -4,7 +4,6 @@ import { evictDurableObject, reset, runInDurableObject } from "cloudflare:test";
 import { afterEach, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import { hash as credentialHash } from "../src/model";
-import { issueInvitation } from "../src/identity";
 
 const origin = "http://127.0.0.1", repo = "monitor-owner/agent-releases", node = "a".repeat(32);
 const file = "spider-watch-windows-amd64.exe", hash = "a".repeat(64), revision = "c".repeat(40);
@@ -36,7 +35,7 @@ function bundle(options: Options = {}) {
   const assets = vi.spyOn(env.ASSETS, "fetch").mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
     const req = new Request(input, init), path = new URL(req.url).pathname;
     observed.push(req);
-    if (path === "/_downloads/current.json") {
+    if (path === "/downloads/current.json") {
       await options.beforeMetadata?.();
       if (options.metadataStatus) return new Response(null, { status: options.metadataStatus });
       const asset = { os: "windows", arch: "amd64", file, bytes: binary.length, sha256: hash };
@@ -46,7 +45,7 @@ function bundle(options: Options = {}) {
     if (path === "/install.sh") return new Response(req.method === "HEAD" ? null : options.scriptBody ?? installer, { headers: {
       ...(options.scriptLength === null ? {} : { "Content-Length": String(options.scriptLength ?? installer.length) }), "Content-Type": "text/x-shellscript",
     } });
-    if (path.startsWith("/_downloads/") && [file, setup].some(name => path.endsWith("/" + name))) {
+    if (path.startsWith("/downloads/") && [file, setup].some(name => path.endsWith("/" + name))) {
       const headers = new Headers();
       if (options.length !== undefined) headers.set("Content-Length", String(options.length));
       if (options.encoding) headers.set("Content-Encoding", options.encoding);
@@ -67,11 +66,11 @@ it("serves the deployed revision and streams same-origin assets without GitHub o
   const before = await snapshot();
   expect(await (await check()).json()).toMatchObject({ enabled: true, version: "0.7.1", revision });
   const metadata = await manifest(); expect(metadata.revision).toBe(revision);
-  expect(metadata.assets[0].url).toBe(`${origin}/v1/updates/agent/stable/0.7.1/${hash}/${file}`);
+  expect(metadata.assets[0].url).toBe(`${origin}/downloads/${file}`);
   const response = await request(metadata.assets[0].url);
   expect(new Uint8Array(await response.arrayBuffer())).toEqual(binary);
   expect(response.headers.get("Content-Length")).toBe(String(binary.length));
-  expect(response.headers.get("Cache-Control")).toContain("no-store");
+  expect(response.headers.get("Cache-Control")).toBe("no-cache");
   expect(await snapshot()).toEqual(before);
   expect(source.network).not.toHaveBeenCalled();
   for (const req of source.observed) for (const key of ["Authorization", "Cookie", "X-Monitor-Node-ID"]) expect(req.headers.has(key)).toBe(false);
@@ -86,6 +85,7 @@ it("keeps the exact legacy update JSON schema unless revision support is request
     expect(data).not.toHaveProperty("revision");
     expect(Object.keys(data).sort()).toEqual((path.endsWith("check") ? ["enabled", "version", "release_tag", "manifest_url"] : ["schema", "version", "release_tag", "assets"]).sort());
     expect(data.version).toBe("0.7.1");
+    if (Array.isArray(data.assets)) expect(data.assets[0].url).toBe(`${origin}/v1/updates/agent/stable/0.7.1/${hash}/${file}`);
   }
 });
 
@@ -128,9 +128,9 @@ it("rechecks revocation and manual-mode changes while static metadata is being r
   expect(result).toMatchObject({ config: { enabled: false } });
 });
 
-it("requires registered credentials for metadata and binary GET/HEAD, even when the assets exist", async () => {
-  const source = bundle(); await setDOEnv(); const metadata = await manifest();
-  const paths = ["/v1/update/check", "/v1/update/automatic", "/v1/updates/agent/stable/manifest.json", metadata.assets[0].url];
+it("requires registered credentials for update metadata and legacy binary GET/HEAD", async () => {
+  const source = bundle(); await setDOEnv();
+  const paths = ["/v1/update/check", "/v1/update/automatic", "/v1/updates/agent/stable/manifest.json", `/v1/updates/agent/stable/0.7.1/${hash}/${file}`];
   const beforeAssets = source.assets.mock.calls.length;
   for (const path of paths) for (const method of ["GET", "HEAD"]) {
     const response = await worker.fetch(new Request(path.startsWith("http") ? path : origin + path, { method }), configured());
@@ -173,7 +173,7 @@ it("cancels static binary reads when the client disconnects", async () => {
   const reader = response.body!.getReader(); await reader.read(); await reader.cancel(); await cancellation;
 });
 
-it("blocks raw asset paths, internal paths, panel aliases, unsafe settings, and unauthenticated Windows downloads", async () => {
+it("blocks removed private paths, internal paths, unsafe settings, and panel access without authentication", async () => {
   const source = bundle(), monitor = vi.spyOn(env.MONITOR, "getByName").mockImplementation(() => { throw new Error("must not enter DO"); });
   for (const path of ["/_downloads/current.json", "/panel/_downloads/current.json", "/panel/%5fdownloads/current.json", "/internal/install-authorize", "/internal/update-state", "/agent-releases/index.json"]) expect((await request(path)).status).toBe(404);
   for (const path of ["../secret", "/absolute", "agent//stable", "Agent/Stable", "https://example.test", "api/files", "a".repeat(65)]) expect((await enable(path)).status).toBe(400);
@@ -182,12 +182,18 @@ it("blocks raw asset paths, internal paths, panel aliases, unsafe settings, and 
   expect(monitor).not.toHaveBeenCalled(); expect(source.assets).not.toHaveBeenCalled();
 });
 
-it("serves the public script and authenticated Windows installer without waking the DO", async () => {
+it("serves public scripts, metadata, Windows installers and binaries with no session or DO lookup", async () => {
   const source = bundle(), monitor = vi.spyOn(env.MONITOR, "getByName").mockImplementation(() => { throw new Error("must not enter DO"); });
-  expect(await (await request("/install.sh")).text()).toContain("#!/bin/sh");
-  expect((await request("/install.sh", "HEAD")).status).toBe(200);
-  expect(new Uint8Array(await (await request("/panel/downloads/" + setup)).arrayBuffer())).toEqual(binary);
-  expect((await request("/panel/downloads/../private")).status).toBe(404);
+  const production = githubSettings();
+  for (const path of ["/install.sh", "/downloads/current.json", "/downloads/" + setup, "/downloads/" + file]) for (const method of ["GET", "HEAD"]) {
+    const response = await worker.fetch(new Request("https://monitor.example.test" + path, { method }), production);
+    expect(response.status).toBe(200);
+    if (method === "HEAD") expect(await response.text()).toBe("");
+    else if (path.endsWith(".exe")) expect(new Uint8Array(await response.arrayBuffer())).toEqual(binary);
+    else if (path.endsWith(".json")) expect(await response.json()).toMatchObject({ version: "0.7.1", revision });
+    else expect(await response.text()).toContain("#!/bin/sh");
+  }
+  for (const path of ["/downloads/secret.txt", "/downloads/0.7.1/" + file, "/bootstrap/install/invalid/current.json"]) expect((await request(path)).status).toBe(404);
   expect(monitor).not.toHaveBeenCalled(); expect(source.network).not.toHaveBeenCalled();
 });
 
@@ -206,30 +212,6 @@ it("serves a bounded public installer when ASSETS omits Content-Length, includin
   source.options.scriptBody = installer; source.options.scriptLength = installer.length + 1;
   expect((await request("/install.sh")).status).toBe(503);
   expect(monitor).not.toHaveBeenCalled(); expect(source.network).not.toHaveBeenCalled();
-});
-
-it("allows installation downloads only while the particular invitation remains unconsumed", async () => {
-  const source = bundle(); await setDOEnv();
-  const created = await (await request("/api/invitations", "POST")).json<{ id: string; server: string }>();
-  const token = new URLSearchParams(new URL(created.server).hash.slice(1)).get("invite")!;
-  const base = "/bootstrap/install/" + encodeURIComponent(token);
-  expect(await (await request(base + "/current.json")).json()).toMatchObject({ version: "0.7.1", revision });
-  expect(new Uint8Array(await (await request(base + "/0.7.1/" + file)).arrayBuffer())).toEqual(binary);
-  expect((await request(base + "/0.7.0/" + file)).status).toBe(404);
-  expect((await request(base + "/0.7.1/secret.txt")).status).toBe(404);
-  await request("/api/invitations/" + created.id, "DELETE");
-  expect((await request(base + "/current.json")).status).toBe(403);
-  expect((await request(base + "/0.7.1/" + file, "HEAD")).status).toBe(403);
-  expect(source.network).not.toHaveBeenCalled();
-});
-
-it("rejects invalid or expired invitation download tokens before a DO lookup", async () => {
-  const source = bundle(), expired = await issueInvitation(env, node, Date.now() - 1);
-  const monitor = vi.spyOn(env.MONITOR, "getByName").mockImplementation(() => { throw new Error("must not enter DO"); });
-  for (const token of ["invalid", expired, node + "." + (Date.now() + 60000) + "." + "b".repeat(43) + "="]) {
-    expect((await request("/bootstrap/install/" + encodeURIComponent(token) + "/current.json")).status).toBe(403);
-  }
-  expect(monitor).not.toHaveBeenCalled(); expect(source.assets).not.toHaveBeenCalled();
 });
 
 it("checks a registered device platform and version using the bundled deployment", async () => {
