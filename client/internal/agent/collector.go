@@ -36,10 +36,11 @@ func NewCollector(c Config, version string) *Collector {
 	if len(hostname) > 128 {
 		hostname = hostname[:128]
 	}
+	topology := cpuTopology()
 	return &Collector{
 		config: c,
 		host: HostInfo{Hostname: hostname, OS: runtime.GOOS, Arch: releaseArch(),
-			Kernel: kernelVersion(), CPUs: runtime.NumCPU(), CPUModel: sanitizeCPUModel(cpuModel()), PhysicalCPUs: physicalCPUs(), Version: version, Revision: BuildRevision},
+			Kernel: kernelVersion(), CPUs: runtime.NumCPU(), LogicalCPUs: topology.logical, CPUModel: sanitizeCPUModel(cpuModel()), PhysicalCPUs: topology.physical, Version: version, Revision: BuildRevision},
 	}
 }
 

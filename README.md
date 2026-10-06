@@ -27,6 +27,21 @@ Cloudflare Workers + SQLite Durable Objects 网络监控面板，配套单文件
 
 点击部署，之后推送到生产分支会自动触发。Cloudflare 的 Linux 构建环境交叉编译 19 个平台二进制，并用 NSIS 生成 3 个 Windows 安装包。全部文件生成并通过完整性校验后，才部署同一提交的面板、Worker 和静态文件；失败时保留当前线上版本。编译工具固定版本并校验 SHA-256，不需要 Wine 或管理员安装权限。
 
+构建环境使用以下版本。根目录和 `worker/` 均带有版本文件，因此已有根目录设为 `worker` 的部署也能继续使用。
+
+| 环境 | 版本 | 固定方式 |
+|---|---|---|
+| Node.js | `24.18.0` | `.node-version` |
+| Python | `3.13.3` | `.python-version` |
+| Go | `1.26.0` | 构建脚本定位并直接调用指定工具链 |
+| NSIS | `3.13` | 固定下载及 SHA-256 校验 |
+| SCons | `4.10.1` | 固定下载及 SHA-256 校验 |
+| Wrangler | `4.147.0` | `worker/package.json` 与 lock 文件 |
+
+如需在 Cloudflare 控制台明确配置，在 **Settings → Builds → Build variables and secrets** 设置 `NODE_VERSION=24.18.0`、`PYTHON_VERSION=3.13.3`、`GO_VERSION=1.26.0`。这些是构建变量，不放进 Worker 运行时的 Variables and Secrets；环境变量优先时应与仓库版本一致。当前镜像为 Ubuntu 24.04 / x86_64，内置 npm 10.9.2、GCC/G++ 13.3.0；系统镜像由 Cloudflare 维护，项目依赖使用 `npm ci` 和 lock 文件固定。Go 编译保留 `nojsonv2`，先完成工具链选择再应用编译参数，兼容镜像预装旧 Go 的情况。[构建环境说明](https://developers.cloudflare.com/workers/ci-cd/builds/build-image/)
+
+免费计划按构建耗时计量，每月 3,000 分钟，并行 1 个构建，单次最长 20 分钟，提供 2 vCPU、8 GB 内存和 20 GB 磁盘。按平均每次 5 / 10 / 15 分钟估算，分别约为每月 600 / 300 / 200 次；19 个平台在同一个构建中编译，以整次实际耗时计算，不能再乘以平台数量。为失败、重试和其他项目预留余量，不把理论次数当作保证。建议启用构建缓存；本项目将工具和 Go 缓存放在 npm 缓存目录下。缓存每项目最多 10 GB，闲置 7 天会清理，下一次构建可能更慢。[免费额度](https://developers.cloudflare.com/workers/ci-cd/builds/limits-and-pricing/) · [构建缓存](https://developers.cloudflare.com/workers/ci-cd/builds/build-caching/)
+
 部署脚本自动创建 SQLite Durable Object 绑定，并补齐注册邀请密钥和会话签名密钥；后续部署保留已有密钥与设置。
 
 首次部署完成后，在 Worker 的 **Settings → Domains & Routes → Add → Custom Domain** 绑定面板域名，例如 `monitor.example.com`，再继续设置登录。登录配置未完成时，页面只显示配置提示，不能取得管理权限。
@@ -115,7 +130,9 @@ spider-watch configure --server "面板提供的完整邀请地址" --join 网�
 
 设备配置中可设置名称、分组、图标和自动更新。自动更新由系统每 6 小时检查一次；手动可执行 `spider-watch --update`，Unix 使用 sudo，Windows 使用管理员终端。检查但不安装：`spider-watch update --check`。OpenRC/procd 的自动更新需要正在运行的 cron 服务。
 
-安装脚本和 `/downloads/` 下的编译文件均公开下载，固定地址随部署更新。它们由 Workers 静态资源直接返回，不进入 Worker 代码，也不调用 DO；下载不携带设备密钥或邀请码。设备注册仍需一次性邀请，更新检查仍验证已注册身份与自动更新设置。客户端校验版本、大小和 SHA-256 后替换；部署期间文件变化导致校验不一致时停止安装，可稍后重试。旧客户端的签名下载地址保留兼容。没有额外常驻更新进程。
+安装脚本和 `/downloads/` 下的编译文件均公开下载，固定地址随部署更新。它们由 Workers 静态资源直接返回，不进入 Worker 代码，也不调用 DO；下载不携带设备密钥或邀请码。构建时为大文件额外生成 4 个静态分片，安装脚本和客户端更新最多并行下载 4 份，流式合并后校验整文件 SHA-256；分片不可用时自动退回整文件下载。入口脚本和版本信息保持单次下载。安装终端显示各阶段及失败原因。安装脚本在 curl 8.4 或更新版本启用并行，较旧版本显示提示并使用兼容模式；客户端自身的并行更新不依赖 curl。
+
+设备注册仍需一次性邀请，关闭添加设备弹窗会取消未完成的邀请，再次打开生成新令牌；断网或浏览器强制退出时，未送达的撤销由下一次生成或 5 分钟过期兜底。更新检查仍验证已注册身份与自动更新设置。客户端校验版本、大小和 SHA-256 后替换；部署期间文件变化导致校验不一致时停止安装，可稍后重试。旧客户端的签名下载地址保留兼容。没有额外常驻更新进程。
 
 Windows 可在 **设置 → 应用 → SpiderWatch → 卸载** 移除程序、服务和更新任务。卸载保留 `%ProgramData%\spider-watch\state` 中的设备身份，以便重装复用；永久撤销设备请同时在面板删除。Unix 身份位于 `/var/lib/spider-watch/state`。
 

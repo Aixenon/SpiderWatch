@@ -857,6 +857,7 @@ export class MonitorGroup extends DurableObject<Env> {
           a.host = { hostname: host.hostname, os: host.os, arch: host.arch, cpus: host.cpus, agent_version: a.agentVersion };
           if (a.agentRevision) a.host.agent_revision = a.agentRevision;
           if (host.physical_cpus !== undefined) a.host.physical_cpus = host.physical_cpus;
+          if (host.logical_cpus !== undefined) a.host.logical_cpus = host.logical_cpus;
           if (host.cpu_model !== undefined) a.host.cpu_model = host.cpu_model;
           if (typeof host.kernel === "string" && host.kernel.length <= 128) a.host.kernel = host.kernel;
           const stored = this.query<{host:string}>("SELECT host FROM nodes WHERE node_id=?", a.id!)[0];

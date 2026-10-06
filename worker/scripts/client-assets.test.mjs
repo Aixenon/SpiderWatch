@@ -26,6 +26,23 @@ test('packages all 19 binaries, three installers and metadata with reproducible 
   assert.equal((await readdir(resolve(output, 'downloads'))).length, 28);
 });
 
+test('packages four static parts for large clients and installers while preserving the complete download', async () => {
+  await makeClientReleaseFixture(release, { artifactBytes: 256 * 1024 + 1 });
+  const current = await packageClientAssets(release, output);
+  assert.equal(current.files.length, 27);
+  for (const file of current.files.filter(file => file.bytes >= 256 * 1024)) {
+    const directory = resolve(output, 'downloads/parts', file.sha256);
+    assert.deepEqual((await readdir(directory)).sort(), ['0', '1', '2', '3', 'size']);
+    assert.equal(await readFile(resolve(directory, 'size'), 'utf8'), `${file.bytes}\n`);
+    const parts = await Promise.all([0, 1, 2, 3].map(index => readFile(resolve(directory, String(index)))));
+    const size = Math.ceil(file.bytes / 4);
+    assert.deepEqual(parts.map(part => part.length), [size, size, size, file.bytes - size * 3]);
+    assert.deepEqual(Buffer.concat(parts), await readFile(resolve(release, file.file)));
+    assert.deepEqual(await readFile(resolve(output, 'downloads', file.file)), await readFile(resolve(release, file.file)));
+  }
+  assert.deepEqual(current, await verifyClientRelease(release));
+});
+
 test('refuses incomplete builds, mismatched repositories and stale commits', async () => {
   await assert.rejects(verifyClientRelease(release, { repository: 'other/repo' }), /different repository/);
   await assert.rejects(verifyClientRelease(release, { revision: 'b'.repeat(40) }), /different source commit/);

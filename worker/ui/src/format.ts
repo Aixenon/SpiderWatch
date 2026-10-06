@@ -1,6 +1,10 @@
 import { state, type Node } from "./monitor";
 const known = (value: number | null | undefined): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0;
 export const number = (value: number | null | undefined, digits = 1) => typeof value === "number" && Number.isFinite(value) ? new Intl.NumberFormat("zh-CN", { maximumFractionDigits: digits }).format(value) : "—";
+export function cpuCoreCounts(host: Pick<Node["host"], "cpus" | "physical_cpus" | "logical_cpus">) {
+  const count = (value: number | undefined) => typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? number(value, 0) : "未知";
+  return { physical: count(host.physical_cpus), logical: count(host.logical_cpus === undefined ? host.cpus : host.logical_cpus) };
+}
 export function bytes(value: number | null | undefined) {
   if (!known(value)) return "—";
   const units = ["B", "KiB", "MiB", "GiB", "TiB"]; let i = 0;

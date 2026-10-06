@@ -2,7 +2,7 @@
 import { computed, reactive, watch } from "vue";
 import { useRoute } from "vue-router";
 import { historyStatus, loadHistory, resourcePoints, state } from "../monitor";
-import { bytes, groupLabel, number, statusLabel, time, uptime, usageClass } from "../format";
+import { bytes, cpuCoreCounts, groupLabel, number, statusLabel, time, uptime, usageClass } from "../format";
 import { cpuDetails, memoryDetails, diskGroups, volumeName, diskSummary } from "../../../public/metrics.js";
 import { CHART_RANGES, DEFAULT_CHART_SECONDS } from "../../../public/resource-charts.js";
 import ResourceChart from "../components/ResourceChart.vue";
@@ -10,6 +10,7 @@ import DeviceIcon from "../components/DeviceIcon.vue";
 
 const route = useRoute();
 const node = computed(() => state.nodes.find(n => n.node_id === route.params.id && n.state === "approved"));
+const cores = computed(() => node.value ? cpuCoreCounts(node.value.host) : { physical: "未知", logical: "未知" });
 const disks = computed(() => diskGroups(node.value?.metrics));
 const totalDisk = computed(() => diskSummary(node.value?.metrics));
 const points = computed(() => node.value ? resourcePoints(node.value.node_id) : []);
@@ -53,8 +54,9 @@ watch(() => node.value?.node_id, () => {
         <div class="panel-heading processor-heading"><h2 class="processor-title"><span>处理器</span><span v-if="node.host.cpu_model" class="cpu-model">{{ node.host.cpu_model }}</span></h2><strong class="resource-current">{{ percent(node.metrics.cpu_percent) }}</strong></div>
         <ResourceChart :key="`${node.node_id}:cpu`" title="处理器使用率" :points="percentPoints" :end-time="chartEnd" :lines="[{key:'cpu',color:'var(--resource-cpu)'}]" :maximum="100" @range-change="changeRange('cpu', $event)"/>
         <dl class="compact-facts cpu-facts">
+          <div><dt>物理核心</dt><dd>{{ cores.physical }}</dd></div>
+          <div><dt>逻辑核心</dt><dd>{{ cores.logical }}</dd></div>
           <div v-for="row in cpuDetails(node.metrics).slice(1)" :key="row.label"><dt>{{ row.label }}</dt><dd>{{ percent(row.value) }}</dd></div>
-          <div><dt>物理 / 逻辑核心</dt><dd>{{ node.host.physical_cpus || '—' }} / {{ node.host.cpus || '—' }}</dd></div>
         </dl>
       </section>
 

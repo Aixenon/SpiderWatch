@@ -10,6 +10,7 @@ type HostInfo struct {
 	Arch         string `json:"arch"`
 	Kernel       string `json:"kernel,omitempty"`
 	CPUs         int    `json:"cpus"`
+	LogicalCPUs  int    `json:"logical_cpus,omitempty"`
 	CPUModel     string `json:"cpu_model,omitempty"`
 	PhysicalCPUs int    `json:"physical_cpus,omitempty"`
 	Version      string `json:"agent_version,omitempty"`

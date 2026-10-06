@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -242,35 +241,6 @@ func validBuildRevision(value string) bool {
 		}
 	}
 	return true
-}
-
-// DownloadUpdate streams at most the declared size into a caller-owned temporary
-// file. It never buffers the binary, executes it, or changes the live executable.
-func (c *Client) DownloadUpdate(ctx context.Context, asset UpdateAsset, destination *os.File) error {
-	if asset.Bytes < 1024 || asset.Bytes > MaxBinaryBytes || !validDigest(asset.SHA256) {
-		return errors.New("invalid update size or digest")
-	}
-	u, err := c.updateURL(asset.URL, false)
-	if err != nil {
-		return err
-	}
-	res, err := c.updateRequest(ctx, u.String(), 2*time.Minute)
-	if err != nil {
-		return err
-	}
-	defer res.Body.Close()
-	if res.ContentLength >= 0 && res.ContentLength != asset.Bytes {
-		return errors.New("update Content-Length mismatch")
-	}
-	hash := sha256.New()
-	n, err := io.CopyBuffer(io.MultiWriter(destination, hash), io.LimitReader(res.Body, asset.Bytes+1), make([]byte, 32<<10))
-	if err != nil || n != asset.Bytes || hex.EncodeToString(hash.Sum(nil)) != asset.SHA256 {
-		return errors.New("update size or SHA-256 verification failed")
-	}
-	if err = destination.Sync(); err != nil {
-		return errors.New("cannot sync downloaded update")
-	}
-	return nil
 }
 
 func verifyUpdateFile(file string, asset UpdateAsset) error {

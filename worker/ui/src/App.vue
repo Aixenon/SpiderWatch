@@ -8,6 +8,10 @@ import Login from "./components/Login.vue";
 
 const route = useRoute();
 const exiting = ref(false);
+const themeNames: Record<ThemeMode, string> = { auto: "自动", light: "浅色", dark: "深色" };
+const nextTheme = computed<ThemeMode>(() => themeMode.value === "auto" ? "light" : themeMode.value === "light" ? "dark" : "auto");
+const themeLabel = computed(() => themeMode.value === "auto" ? `自动 · ${themeNames[theme.value]}` : themeNames[themeMode.value]);
+const themeHint = computed(() => `当前${themeLabel.value}，点击切换为${themeNames[nextTheme.value]}`);
 const pending = computed(() => state.nodes.filter(n => n.state === "pending").length);
 const livePage = computed(() => authenticated.value && (route.path === "/" || (route.path.startsWith("/server/") && state.nodes.some(n => n.node_id === route.params.id && n.state === "approved"))));
 watch(livePage, watchLive, { immediate: true });
@@ -34,7 +38,17 @@ async function exit() {
         <RouterLink to="/admin" :class="{ active: route.path === '/admin' }">管理<span v-if="pending" class="nav-count">{{ pending }}</span></RouterLink>
         <RouterLink to="/settings" :class="{ active: route.path === '/settings' }">设置</RouterLink>
       </nav>
-      <div class="header-end"><select class="theme-toggle" aria-label="显示模式" title="自动：本地时间 07:00–19:00 浅色，其余时间深色" :value="themeMode" @change="setThemeMode(($event.target as HTMLSelectElement).value as ThemeMode)"><option value="auto">{{ themeMode === 'auto' ? `自动 · ${theme === 'dark' ? '深色' : '浅色'}` : '自动' }}</option><option value="light">浅色</option><option value="dark">深色</option></select><button v-if="authenticated" class="button-quiet" aria-label="退出登录" :disabled="exiting" @click="exit">退出</button></div>
+      <div class="header-end">
+        <button type="button" class="secondary theme-toggle" :aria-label="themeHint" :title="themeHint" @click="setThemeMode(nextTheme)">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <template v-if="themeMode === 'auto'"><circle cx="12" cy="12" r="8.5"/><path d="M12 7v5l3 2"/></template>
+            <template v-else-if="themeMode === 'light'"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></template>
+            <path v-else d="M20.7 13A8.7 8.7 0 0 1 11 3.3 8.7 8.7 0 1 0 20.7 13Z"/>
+          </svg>
+          <span>{{ themeLabel }}</span>
+        </button>
+        <button v-if="authenticated" class="button-quiet" aria-label="退出登录" :disabled="exiting" @click="exit">退出</button>
+      </div>
     </header>
 
     <div v-if="authenticated && runtime.notice" class="notice" :class="{ error: runtime.error }" role="status" aria-live="polite">{{ runtime.notice }}</div>
@@ -52,6 +66,7 @@ async function exit() {
 
 <style scoped>
 .session-loading{text-align:center;color:var(--muted);padding:64px 0}
-.theme-toggle{width:116px;min-height:34px;padding:5px 8px;font-size:12px;background:var(--panel);color:var(--ink);border-color:var(--line)}
+.theme-toggle{width:116px;min-height:34px;padding:5px 8px;gap:6px;font-size:12px;font-weight:500;background:var(--panel);color:var(--ink);border-color:var(--line)}
+.theme-toggle svg{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
 @media(max-width:600px){.theme-toggle{width:104px;font-size:11px}}
 </style>

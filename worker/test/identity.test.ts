@@ -171,6 +171,28 @@ it("cancels unused invitations and prevents a deleted device being recreated wit
   expect(await (await consume(await enrollment(device,newInvitation))).json()).toMatchObject({state:"approved"});
 });
 
+it("closing an old dialog cannot revoke its registered device or a newer invitation",async()=>{
+  const {device,invitation}=await registered(), next=await invite(), fresh=await identity();
+  expect(next.id).not.toBe(invitation.id);expect(next.token).not.toBe(invitation.token);
+  expect((await admin(`/api/invitations/${invitation.id}`,"DELETE")).status).toBe(200);
+  expect(await (await admin(`/api/invitations/${invitation.id}`)).json()).toEqual({state:"registered",node_id:device.id});
+  expect(await (await admin(`/api/invitations/${next.id}`)).json()).toMatchObject({state:"pending"});
+  expect(await (await consume(await signed(device,"/bootstrap/status","POST"))).json()).toMatchObject({state:"approved"});
+  expect((await consume(await enrollment(fresh,next))).status).toBe(200);
+});
+
+it("a concurrent close and registration never leaves a reusable invitation or removes an approved device",async()=>{
+  const invitation=await invite(), device=await identity();
+  const joining=await enrollment(device,invitation);
+  const [result,closing]=await Promise.all([consume(joining),admin(`/api/invitations/${invitation.id}`,"DELETE")]);
+  expect(closing.status).toBe(200);expect([200,403]).toContain(result.status);
+  const state=await (await admin("/api/state?view=live")).json<any>();
+  expect(state.invitations).toEqual([]);
+  expect(state.nodes).toHaveLength(result.status===200?1:0);
+  if(result.status===200) expect(state.nodes[0]).toMatchObject({node_id:device.id,state:"approved"});
+  expect((await consume(await enrollment(device,invitation))).status).toBe(403);
+});
+
 it("authenticates update checks too, without querying GitHub for pending, unknown or revoked identities",async()=>{
   const {device}=await registered();
   await runInDurableObject(stub(),(_,ctx)=>ctx.storage.sql.exec("UPDATE nodes SET state='pending' WHERE node_id=?",device.id));

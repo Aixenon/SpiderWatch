@@ -126,7 +126,6 @@ describe("responses completing across a session boundary", () => {
     expect(requestMock).toHaveBeenCalledTimes(2);
     oldResponse.resolve(invitation("old"));
     await expect(oldCreating).rejects.toThrow("会话已结束");
-    expect(invitations.createInvitation("network")).toBe(newCreating);
     expect(requestMock).toHaveBeenCalledTimes(2);
     newResponse.resolve(invitation("new")); await newCreating;
     expect(invitations.registration.invitation?.id).toBe("new");

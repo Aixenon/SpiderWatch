@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
-import { createReadStream } from 'node:fs';
+import { createReadStream, createWriteStream } from 'node:fs';
 import { copyFile, lstat, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
+import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -15,6 +16,8 @@ const binaryName = ({ os, arch }) => `spider-watch-${os}-${arch}${os === 'window
 const installerNames = ['amd64', 'arm64', '386'].map(arch => `spider-watch-windows-${arch}-setup.exe`);
 const scriptNames = ['install.sh', 'install.ps1'];
 const metadataNames = ['update-manifest.json', 'checksums.txt', 'release-info.json'];
+const parallelMinimum = 256 * 1024;
+const parallelParts = 4;
 
 async function describe(directory, name, min = 1, max = staticAssetLimit) {
   const path = resolve(directory, name);
@@ -75,8 +78,35 @@ export async function packageClientAssets(directory, assetsDirectory, options = 
     await copyFile(resolve(directory, file.file), resolve(destination, file.file));
     const copied = await describe(destination, file.file);
     if (copied.bytes !== file.bytes || copied.sha256 !== file.sha256) throw new Error(`Client artifact changed during packaging: ${file.file}`);
+    if (file.bytes >= parallelMinimum && (manifest.assets.some(asset => asset.file === file.file) || installerNames.includes(file.file))) {
+      await packageParts(destination, file);
+    }
   }
   await copyFile(resolve(destination, 'install.sh'), resolve(assetsDirectory, 'install.sh'));
   await writeFile(resolve(destination, 'current.json'), JSON.stringify(manifest) + '\n');
   return manifest;
+}
+
+// Static parts also work when the asset service does not support HTTP Range.
+// Their content-addressed URLs need no extra manifest fields or Worker requests.
+async function packageParts(destination, file) {
+  const partsDirectory = resolve(destination, 'parts', file.sha256);
+  await mkdir(partsDirectory, { recursive: true });
+  const size = Math.ceil(file.bytes / parallelParts), hash = createHash('sha256');
+  for (let index = 0; index < parallelParts; index++) {
+    const start = index * size, end = Math.min(file.bytes, start + size) - 1;
+    let bytes = 0;
+    await pipeline(
+      createReadStream(resolve(destination, file.file), { start, end }),
+      async function* (source) {
+        for await (const chunk of source) { bytes += chunk.length; hash.update(chunk); yield chunk; }
+      },
+      createWriteStream(resolve(partsDirectory, String(index))),
+    );
+    if (bytes !== end - start + 1) throw new Error(`Incomplete client part: ${file.file}/${index}`);
+  }
+  if (hash.digest('hex') !== file.sha256) throw new Error(`Client artifact changed while splitting: ${file.file}`);
+  // Some asset edges omit Content-Length on HEAD. Bootstrap scripts can read
+  // this tiny bounded value without a JSON parser or a dynamic endpoint.
+  await writeFile(resolve(partsDirectory, 'size'), `${file.bytes}\n`);
 }

@@ -33,6 +33,10 @@ func collectPlatform(c Config) rawMetrics {
 
 func ProcessRSS() (uint64, error) { return 0, errors.New("native RSS adapter unavailable") }
 
-func physicalCPUs() int { return 0 }
+func cpuTopology() cpuTopologyCounts {
+	logical, _ := syscall.SysctlUint32("hw.ncpu")
+	// hw.ncpu is a logical count. It does not establish physical topology.
+	return checkedCPUTopology(0, int(logical))
+}
 
 func cpuModel() string { return "" }

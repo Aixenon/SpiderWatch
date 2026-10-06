@@ -3,7 +3,6 @@
 package agent
 
 import (
-	"encoding/binary"
 	"strings"
 	"syscall"
 	"unsafe"
@@ -15,7 +14,6 @@ var (
 	findVolumeClose        = kernel32.NewProc("FindVolumeClose")
 	volumePaths            = kernel32.NewProc("GetVolumePathNamesForVolumeNameW")
 	volumeInformation      = kernel32.NewProc("GetVolumeInformationW")
-	processorInformation   = kernel32.NewProc("GetLogicalProcessorInformationEx")
 	performanceInformation = kernel32.NewProc("K32GetPerformanceInfo")
 )
 
@@ -65,30 +63,6 @@ func configuredWindowsVolumes(c Config) []DiskMetrics {
 		}
 	}
 	return rows
-}
-func physicalCPUs() int {
-	var size uint32
-	processorInformation.Call(0, 0, uintptr(unsafe.Pointer(&size)))
-	if size < 8 || size > 1<<20 {
-		return 0
-	}
-	data := make([]byte, size)
-	if ok, _, _ := processorInformation.Call(0, uintptr(unsafe.Pointer(&data[0])), uintptr(unsafe.Pointer(&size))); ok == 0 {
-		return 0
-	}
-	count := 0
-	for offset := uint32(0); offset+8 <= size; {
-		relationship := binary.LittleEndian.Uint32(data[offset:])
-		length := binary.LittleEndian.Uint32(data[offset+4:])
-		if length < 8 || length > size-offset {
-			return 0
-		}
-		if relationship == 0 {
-			count++
-		}
-		offset += length
-	}
-	return count
 }
 
 type performanceInfo struct {

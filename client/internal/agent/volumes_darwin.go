@@ -56,10 +56,3 @@ func collectVolumes(c Config) []DiskMetrics {
 	}
 	return rows
 }
-func physicalCPUs() int {
-	value, err := syscall.SysctlUint32("hw.physicalcpu")
-	if err != nil {
-		return 0
-	}
-	return int(value)
-}

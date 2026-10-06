@@ -25,7 +25,7 @@ NETWORK = 'abcd1234EFGH5678'
 @unittest.skipUnless(SHELL, 'requires a POSIX shell')
 class UnixEnrollmentTests(unittest.TestCase):
     def install(self, registration_exit=0, extra=None, checksum_duplicate=False,
-                manifest_version='1.2.3', elevate=False):
+                manifest_version='1.2.3', elevate=False, download_exit=0):
         with tempfile.TemporaryDirectory(prefix='.installer-test-', dir=ROOT) as directory:
             root = Path(directory)
             binary = root / 'binary'
@@ -40,11 +40,13 @@ exit "$TEST_REGISTRATION_EXIT"
             (root / 'manifest').write_text(json.dumps({'schema': 1, 'version': manifest_version}))
             probes = r'''uname() { printf 'Linux\n'; }
 curl() {
+  if [ "$1" = --version ]; then printf 'curl 7.88.1\n'; return 0; fi
   url=; target=; redirects=; protocols=
   while [ "$#" -gt 0 ]; do
     case "$1" in https://*|http://*) url=$1; shift;; -o) target=$2; shift 2;; --max-redirs) redirects=$2; shift 2;; --proto) protocols=$2; shift 2;; *) shift;; esac
   done
   printf '%s\n' "$url" >> "$TEST_FIXTURES/downloads"
+  [ "$TEST_DOWNLOAD_EXIT" = 0 ] || return "$TEST_DOWNLOAD_EXIT"
   case "$url" in
     https://github.com/owner/fork/releases/download/v1.2.3/checksums.txt) cp "$TEST_FIXTURES/checksums" "$target";;
     https://github.com/owner/fork/releases/download/v1.2.3/spider-watch-linux-amd64) cp "$TEST_FIXTURES/binary" "$target";;
@@ -74,7 +76,8 @@ script=$TEST_INSTALLER
             env = {**SHELL_ENV, 'TEST_FIXTURES': str(root).replace('\\', '/'),
                    'TEST_INSTALLER': str(ROOT / 'install.sh').replace('\\', '/'),
                    'TEST_ARGUMENTS': str(arguments).replace('\\', '/'),
-                   'TEST_REGISTRATION_EXIT': str(registration_exit)}
+                   'TEST_REGISTRATION_EXIT': str(registration_exit),
+                   'TEST_DOWNLOAD_EXIT': str(download_exit)}
             # /... is also required by the installer's prefix check under Git Bash.
             prefix = str(root / 'installed').replace('\\', '/')
             if os.name == 'nt':
@@ -101,11 +104,31 @@ script=$TEST_INSTALLER
         self.assertEqual(self.downloads, [base + '/current.json', base + '/checksums.txt',
                                          base + '/spider-watch-linux-amd64'])
         self.assertTrue(all(TOKEN not in url and 'invite' not in url for url in self.downloads))
+        output = result.stdout + result.stderr
+        for stage in ['Platform: linux/amd64', 'Getting the current client version',
+                      'Downloaded version metadata', 'Client version: 1.2.3',
+                      'Downloading spider-watch-linux-amd64', 'Checksum and executable version verified',
+                      'Installing the client', 'Registering this device', 'Registration complete']:
+            self.assertIn(stage, output)
+        self.assertNotIn(TOKEN, output)
+        self.assertNotIn(SERVER, output)
 
     def test_failed_registration_does_not_report_installation_success(self):
         result, _ = self.install(registration_exit=23)
         self.assertEqual(result.returncode, 23, result.stderr)
         self.assertNotIn('Installed ', result.stdout)
+        self.assertIn('Failed while Registering this device (exit 23)', result.stderr)
+        self.assertNotIn('Registration complete', result.stderr)
+        self.assertNotIn(TOKEN, result.stdout + result.stderr)
+
+    def test_failed_download_keeps_exit_code_and_identifies_stage(self):
+        result, args = self.install(download_exit=22)
+        self.assertEqual(result.returncode, 22)
+        self.assertIsNone(args)
+        self.assertIn('Download failed: version metadata (curl exit 22)', result.stderr)
+        self.assertIn('Failed while Downloading version metadata (exit 22)', result.stderr)
+        self.assertNotIn('Downloaded version metadata', result.stderr)
+        self.assertNotIn(TOKEN, result.stdout + result.stderr)
 
     def test_registration_arguments_must_be_paired(self):
         for extra in [['--server', SERVER], ['--join', NETWORK]]:
@@ -162,6 +185,43 @@ script=$TEST_INSTALLER
 
 @unittest.skipUnless(POWERSHELL, 'requires Windows PowerShell')
 class WindowsEnrollmentTests(unittest.TestCase):
+    def download_log(self, exit_code=0):
+        script = r'''
+$ErrorActionPreference = 'Stop'
+$tokens = $null; $errors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile($env:TEST_INSTALLER,[ref]$tokens,[ref]$errors)
+if ($errors.Count) { throw 'Cannot parse Windows installer' }
+$function = $ast.Find({param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-InstallFile'
+}, $true)
+if (!$function) { throw 'Cannot find the download function' }
+. ([scriptblock]::Create($function.Extent.Text))
+$taskProtocols = '=https'; $taskRedirects = 0
+function curl.exe { $global:LASTEXITCODE = [int]$env:TEST_EXIT }
+$message = ''
+try { Get-InstallFile $env:TEST_SERVER 'unused.tmp' 65536 120 'version metadata' }
+catch { $message = $_.Exception.Message }
+Write-Output ('RESULT:' + (@{error=$message; step=$taskStep} | ConvertTo-Json -Compress))
+'''
+        env = {**os.environ, 'TEST_INSTALLER': str(ROOT / 'install.ps1'),
+               'TEST_SERVER': SERVER, 'TEST_EXIT': str(exit_code)}
+        result = subprocess.run([POWERSHELL, '-NoProfile', '-NonInteractive', '-Command', script],
+                                env=env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(TOKEN, result.stdout + result.stderr)
+        line = next(line for line in result.stdout.splitlines() if line.startswith('RESULT:'))
+        return result.stdout, json.loads(line.removeprefix('RESULT:'))
+
+    def test_windows_download_logs_success_and_failure_without_credentials(self):
+        output, result = self.download_log()
+        self.assertEqual(result['error'], '')
+        self.assertIn('Downloading version metadata', output)
+        self.assertIn('Downloaded version metadata', output)
+        output, result = self.download_log(exit_code=22)
+        self.assertIn('curl exit 22', result['error'])
+        self.assertEqual(result['step'], 'downloading version metadata')
+        self.assertNotIn('Downloaded version metadata', output)
+
     def download_source(self, server=SERVER, local=False):
         script = r'''
 $ErrorActionPreference = 'Stop'
@@ -234,6 +294,8 @@ Write-Output ('RESULT:' + (@{failed=$failed; arguments=$script:CapturedArguments
         result = subprocess.run([POWERSHELL, '-NoProfile', '-NonInteractive', '-Command', script],
                                 env=env, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.registration_logs = '\n'.join(line for line in result.stdout.splitlines()
+                                           if not line.startswith('RESULT:')) + result.stderr
         line = next(line for line in result.stdout.splitlines() if line.startswith('RESULT:'))
         return json.loads(line.removeprefix('RESULT:'))
 
@@ -241,6 +303,9 @@ Write-Output ('RESULT:' + (@{failed=$failed; arguments=$script:CapturedArguments
         result = self.registration()
         self.assertFalse(result['failed'])
         self.assertEqual(result['arguments'], ['configure', '--server', SERVER, '--join', NETWORK])
+        self.assertIn('Registering this device', self.registration_logs)
+        self.assertIn('Registration complete', self.registration_logs)
+        self.assertNotIn(TOKEN, self.registration_logs)
 
     def test_registration_failure_propagates(self):
         self.assertTrue(self.registration(exit_code=23)['failed'])

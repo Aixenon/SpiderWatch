@@ -31,7 +31,9 @@ export const USAGE_RETENTION_DAYS = 90;
 export const HISTORY_RETENTION_DAYS = 7;
 export type NodeState = "pending" | "approved" | "revoked";
 export type Device = { node_id: string; name: string; nickname: string; icon: DeviceIcon; auto_update: number; key_hash: string; public_key: string; state: NodeState; host: string; latest: string; last_seen: number };
-export type Host = { hostname: string; os: string; arch: string; cpus: number; physical_cpus?: number; cpu_model?: string; agent_version: string; agent_revision?: string; kernel?: string };
+// cpus is the legacy process-available count. Optional physical/logical counts
+// share the active OS/guest system scope and are omitted when unknown.
+export type Host = { hostname: string; os: string; arch: string; cpus: number; physical_cpus?: number; logical_cpus?: number; cpu_model?: string; agent_version: string; agent_revision?: string; kernel?: string };
 export type Metrics = { time: string; cpu_percent?: number; memory?: { total_bytes: number; used_bytes: number }; agent_rss_bytes?: number; [key: string]: unknown };
 export type Report = { protocol: number; node_id: string; session: string; sequence: number; host: Host; metrics: Metrics; type?: string };
 
@@ -50,7 +52,9 @@ export function validHost(v: unknown): v is Host {
     && (h.agent_revision === undefined || (typeof h.agent_revision === "string" && /^[a-f0-9]{40}$/.test(h.agent_revision)))
     && Number.isInteger(h.cpus) && h.cpus >= 1 && h.cpus <= 65536
     && (h.cpu_model === undefined || (typeof h.cpu_model === "string" && h.cpu_model.length <= 128 && !/[\u0000-\u001f\u007f-\u009f]/.test(h.cpu_model)))
-    && (h.physical_cpus === undefined || (Number.isInteger(h.physical_cpus) && h.physical_cpus >= 1 && h.physical_cpus <= 65536));
+    && (h.physical_cpus === undefined || (Number.isInteger(h.physical_cpus) && h.physical_cpus >= 1 && h.physical_cpus <= 65536))
+    && (h.logical_cpus === undefined || (Number.isInteger(h.logical_cpus) && h.logical_cpus >= 1 && h.logical_cpus <= 65536
+      && (h.physical_cpus === undefined || h.physical_cpus <= h.logical_cpus)));
 }
 const MEMORY_DETAILS = ["free_bytes", "cached_bytes", "buffers_bytes", "active_bytes", "inactive_bytes", "wired_bytes", "committed_bytes", "commit_limit_bytes"];
 const CPU_DETAILS = ["user_percent", "system_percent", "idle_percent", "iowait_percent", "steal_percent"];

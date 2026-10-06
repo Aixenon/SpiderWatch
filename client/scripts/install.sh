@@ -14,8 +14,95 @@ allow_local_http=no
 worker_base=
 download_protocols='=https'
 download_redirects=3
-die() { printf '%s\n' "$*" >&2; exit 1; }
-download() { curl --fail --silent --show-error --location --max-redirs "$download_redirects" --proto "$download_protocols" --proto-redir "$download_protocols" --connect-timeout 10 --max-time 180 --max-filesize "$3" "$1" -o "$2"; }
+install_step='checking installation options'
+stage=
+elevated_script=
+log() { printf '[SpiderWatch] %s\n' "$*" >&2; }
+step() { install_step=$*; log "$install_step..."; }
+die() { log "Error: $*"; exit 1; }
+finish() {
+  install_result=$?
+  trap - EXIT HUP INT TERM
+  set +e
+  if [ "$install_result" -ne 0 ] && [ "$detect_only" != yes ]; then log "Failed while $install_step (exit $install_result)."; fi
+  if [ -n "$stage" ]; then
+    rm -f "$stage/download" "$stage/checksums" "$stage/manifest" "$stage/download-size" "$stage/parts-status"
+    for part in 0 1 2 3; do rm -f "$stage/part-$part"; done
+    rmdir "$stage"
+  fi
+  [ -z "$elevated_script" ] || rm -f "$elevated_script"
+  exit "$install_result"
+}
+trap finish EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+download() {
+  step "Downloading $4"
+  if curl --fail --progress-bar --show-error --location --max-redirs "$download_redirects" --proto "$download_protocols" --proto-redir "$download_protocols" --connect-timeout 10 --max-time 180 --max-filesize "$3" "$1" -o "$2"; then
+    log "Downloaded $4."
+  else
+    download_result=$?
+    log "Download failed: $4 (curl exit $download_result)."
+    return "$download_result"
+  fi
+}
+download_binary() {
+  # curl 8.4 added streaming enforcement of --max-filesize, including responses
+  # without Content-Length. Older versions remain supported by the serial path.
+  if [ -z "$worker_base" ]; then download "$1" "$2" "$3" "$4"; return; fi
+  if ! curl --version 2>/dev/null | awk 'NR==1 {split($2,v,"."); ok=(v[1]>8 || (v[1]==8 && v[2]>=4))} END {exit !ok}'; then
+    log 'curl < 8.4: using single-connection compatibility mode.'
+    download "$1" "$2" "$3" "$4"; return
+  fi
+  step 'Checking the package size for parallel download'
+  package_bytes=
+  if curl --fail --silent --show-error --location --max-redirs 0 --proto "$download_protocols" --proto-redir "$download_protocols" --connect-timeout 10 --max-time 30 --max-filesize 32 -o "$stage/download-size" "$worker_base/parts/$5/size"; then
+    package_bytes=$(awk 'NR==1 && /^[0-9]+$/ && length($0)<=8 {size=$0+0; valid=1} END {if(NR==1 && valid) printf "%.0f",size}' "$stage/download-size")
+    [ -n "$package_bytes" ] && [ "$package_bytes" -gt 0 ] && [ "$package_bytes" -le "$3" ] || die 'Invalid or oversized package size metadata.'
+  else
+    size_result=$?
+    [ "$size_result" -ne 63 ] || die 'Package size metadata exceeds 32 bytes.'
+  fi
+  if [ -z "$package_bytes" ] || [ "$package_bytes" -lt 262144 ]; then
+    log 'Using a single download connection (small package or unavailable size).'
+    download "$1" "$2" "$3" "$4"; return
+  fi
+  parallel_url=$1; parallel_target=$2; parallel_limit=$3; parallel_name=$4; parallel_hash=$5
+  part_bytes=$(((package_bytes + 3) / 4))
+  step "Downloading $parallel_name with 4 parallel connections"
+  set -- --parallel --parallel-max 4 --parallel-immediate --fail-early --show-error --progress-bar
+  for part in 0 1 2 3; do
+    part_limit=$part_bytes
+    [ "$part" -ne 3 ] || part_limit=$((package_bytes - part_bytes * 3))
+    [ "$part" -eq 0 ] || set -- "$@" --next
+    set -- "$@" --fail --location --max-redirs 0 --proto "$download_protocols" --proto-redir "$download_protocols" --connect-timeout 10 --max-time 180 --max-filesize "$part_limit" --write-out '%{http_code}\n' -o "$stage/part-$part" "$worker_base/parts/$parallel_hash/$part"
+  done
+  parallel_ok=yes
+  if curl "$@" > "$stage/parts-status"; then
+    if ! awk '$0!="200" {bad=1} END {exit (NR!=4 || bad)}' "$stage/parts-status"; then parallel_ok=no; fi
+    for part in 0 1 2 3; do
+      part_limit=$part_bytes
+      [ "$part" -ne 3 ] || part_limit=$((package_bytes - part_bytes * 3))
+      if [ ! -f "$stage/part-$part" ] || [ "$(wc -c < "$stage/part-$part")" -ne "$part_limit" ]; then parallel_ok=no; fi
+    done
+    [ "$parallel_ok" = yes ] || log 'Parallel download returned an unexpected status or part length.'
+  else
+    parallel_result=$?
+    parallel_ok=no
+    log "Parallel download failed (curl exit $parallel_result)."
+  fi
+  if [ "$parallel_ok" = yes ]; then
+    step 'Combining the downloaded parts'
+    : > "$parallel_target"
+    for part in 0 1 2 3; do cat "$stage/part-$part" >> "$parallel_target"; rm -f "$stage/part-$part"; done
+    log "Downloaded $parallel_name."
+    return
+  fi
+  for part in 0 1 2 3; do rm -f "$stage/part-$part"; done
+  log 'Retrying with a single download connection.'
+  download "$parallel_url" "$parallel_target" "$parallel_limit" "$parallel_name"
+}
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --repo|--version|--arch|--prefix|--server|--join) [ "$#" -ge 2 ] && [ -n "$2" ] || die "Missing value for $1"; key=$1; value=$2; shift 2
@@ -50,9 +137,12 @@ if [ -n "$server" ] || [ -n "$join" ]; then
 fi
 configure() {
   [ -n "$server" ] || return 0
+  if [ "$service" = yes ]; then step 'Registering this device and starting the service'
+  else step 'Registering this device'; fi
   set -- configure --server "$server" --join "$join"
   [ "$allow_local_http" = no ] || set -- "$@" --allow-local-http
   "$prefix/spider-watch" "$@"
+  log 'Registration complete.'
 }
 system=$(uname -s)
 case "$system" in Linux) goos=linux;; Darwin) goos=darwin;; *) die "Unsupported OS: $system. Windows: use the setup.exe installer.";; esac
@@ -89,6 +179,8 @@ case "$goos-$arch" in
 esac
 artifact=spider-watch-$goos-$arch
 if [ "$detect_only" = yes ]; then printf '%s\n' "$artifact"; exit 0; fi
+log "Platform: $goos/$arch."
+step 'Checking installation requirements'
 if [ -z "$worker_base" ]; then
   printf '%s' "$repo" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$' || die 'Specify --repo OWNER/REPO.'
   [ "$version" = latest ] || printf '%s' "$version" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || die 'Version must be latest or vX.Y.Z.'
@@ -96,18 +188,19 @@ fi
 command -v curl >/dev/null 2>&1 || die 'curl and CA certificates are required.'
 if [ "$service" = yes ]; then
   if [ "$(id -u)" != 0 ]; then
+    log 'Administrator privileges are required; requesting sudo.'
     command -v sudo >/dev/null 2>&1 || die 'Run the installer as root, or install sudo.'
     # A piped shell has no script pathname to re-execute. Save a complete copy
     # from the same trusted source before asking sudo to run it.
     elevated_script=$(mktemp "${TMPDIR:-/tmp}/spider-watch-install.XXXXXX")
-    trap 'rm -f "$elevated_script"' EXIT HUP INT TERM
     if [ -n "$worker_base" ]; then script_url=$origin/install.sh
     elif [ "$version" = latest ]; then script_url=https://github.com/$repo/releases/latest/download/install.sh
     else script_url=https://github.com/$repo/releases/download/$version/install.sh; fi
-    download "$script_url" "$elevated_script" 65536
+    download "$script_url" "$elevated_script" 65536 'installer script'
     set -- --repo "$repo" --version "$version" --arch "$arch" --prefix "$prefix"
     [ -z "$server" ] || set -- "$@" --server "$server" --join "$join"
     [ "$allow_local_http" = no ] || set -- "$@" --allow-local-http
+    step 'Continuing installation with administrator privileges'
     sudo sh "$elevated_script" "$@"
     exit $?
   fi
@@ -130,29 +223,35 @@ case "$prefix" in /*) ;; *) die 'Prefix must be absolute.';; esac
 mkdir -p "$prefix"
 [ ! -L "$prefix/spider-watch" ] || die 'Refusing to overwrite a symbolic link.'
 stage=$(mktemp -d "$prefix/.spider-watch-install.XXXXXX")
-trap 'rm -f "$stage/download" "$stage/checksums" "$stage/manifest"; rmdir "$stage"' EXIT HUP INT TERM
 if [ "$version" = latest ]; then
+  step 'Getting the current client version'
   if [ -n "$worker_base" ]; then manifest_url=$worker_base/current.json
   else manifest_url=https://github.com/$repo/releases/latest/download/update-manifest.json; fi
-  download "$manifest_url" "$stage/manifest" 65536
+  download "$manifest_url" "$stage/manifest" 65536 'version metadata'
+  install_step='reading the client version'
   number=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([0-9.]*\)".*/\1/p' "$stage/manifest")
   case "$number" in *[!0-9.]*|'') die 'Invalid release version.';; esac
   printf '%s' "$number" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || die 'Invalid release version.'
   version=v$number
 fi
+log "Client version: ${version#v}."
 if [ -n "$worker_base" ]; then base=$worker_base
 else base=https://github.com/$repo/releases/download/$version; fi
-download "$base/checksums.txt" "$stage/checksums" 16384
+download "$base/checksums.txt" "$stage/checksums" 16384 'SHA-256 checksums'
+install_step='reading the platform checksum'
 expected=$(awk -v name="$artifact" '$2==name {print $1}' "$stage/checksums")
 [ "${#expected}" -eq 64 ] || die 'Missing/duplicate SHA-256 for this platform.'
 printf '%s' "$expected" | grep -Eq '^[a-f0-9]{64}$' || die 'Missing/duplicate SHA-256 for this platform.'
-download "$base/$artifact" "$stage/download" 16777216
+download_binary "$base/$artifact" "$stage/download" 16777216 "$artifact" "$expected"
+step 'Verifying SHA-256 and executable version'
 if command -v sha256sum >/dev/null 2>&1; then actual=$(sha256sum "$stage/download" | awk '{print $1}')
 elif command -v shasum >/dev/null 2>&1; then actual=$(shasum -a 256 "$stage/download" | awk '{print $1}')
 else die 'A SHA-256 utility is required.'; fi
 [ "$actual" = "$expected" ] || die 'SHA-256 mismatch.'
 chmod 755 "$stage/download"
 [ "$("$stage/download" version)" = "spider-watch ${version#v}" ] || die 'Executable self-check failed.'
+log 'Checksum and executable version verified.'
+step 'Installing the client'
 if [ "$service" = yes ]; then
   case "$manager" in
     systemd) systemctl stop spider-watch.service 2>/dev/null || true;;
@@ -163,6 +262,7 @@ if [ "$service" = yes ]; then
 fi
 mv -f "$stage/download" "$prefix/spider-watch"
 if [ "$service" = no ]; then configure; printf 'Installed %s/spider-watch\n' "$prefix"; exit 0; fi
+step "Installing and starting the $manager service"
 mkdir -p /usr/local/bin
 [ ! -d /usr/local/bin/spider-watch ] || die 'CLI link is a directory.'
 ln -sfn /opt/spider-watch/spider-watch /usr/local/bin/spider-watch
@@ -277,6 +377,7 @@ EOF
   launchctl bootout system/io.spiderwatch.update 2>/dev/null || true
   launchctl bootstrap system /Library/LaunchDaemons/io.spiderwatch.update.plist;;
 esac
+log 'System service installed and started.'
 if [ "$manager" = openrc ] || [ "$manager" = procd ]; then
   if command -v crontab >/dev/null 2>&1; then
     { crontab -l 2>/dev/null | grep -v '# spider-watch-update$' || true; printf '17 */6 * * * /opt/spider-watch/spider-watch update --automatic --config /var/lib/spider-watch/state/config.json >/dev/null 2>&1 # spider-watch-update\n'; } | crontab -

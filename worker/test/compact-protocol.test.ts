@@ -5,7 +5,7 @@ import { afterEach, expect, it } from "vitest";
 import worker from "../src/index";
 
 const origin = "http://127.0.0.1", id = "7".repeat(32), key = "8".repeat(64);
-const host = {hostname:"compact-node",os:"windows",arch:"amd64",cpus:2,physical_cpus:1,cpu_model:"Intel(R) Xeon(R) CPU",agent_version:"0.3.0"};
+const host = {hostname:"compact-node",os:"windows",arch:"amd64",cpus:2,physical_cpus:4,logical_cpus:8,cpu_model:"Intel(R) Xeon(R) CPU",agent_version:"0.3.0"};
 const headers = {"X-Monitor-Node-ID":id,Authorization:"Bearer "+key};
 const clients = new Set<WebSocket>();
 const stub = () => env.MONITOR.getByName(env.MONITOR_GROUP);

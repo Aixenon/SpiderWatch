@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onUnmounted, ref } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
 import { loadState, state } from "../monitor";
 import { activeInvitation, checkInvitation, clearInvitation, createInvitation, type Invitation } from "../invitations";
 import { installCommands } from "../install-commands";
@@ -10,6 +10,7 @@ const creating = ref(false), manualChecking = ref(false), closed = ref(false);
 const commands = computed(() => attempt.value ? installCommands(attempt.value, attempt.value.command.endsWith(" --allow-local-http")) : { windows: [] });
 let timer: ReturnType<typeof setInterval> | undefined, lastCheck = 0;
 let generation = 0, disposed = false;
+let controller: AbortController | undefined;
 type CheckTask = { id:string; generation:number; manual:boolean; promise:Promise<void> };
 let pendingCheck: CheckTask | undefined;
 const valid = computed(() => !closed.value && attempt.value && activeInvitation(state.network, now.value)?.id === attempt.value.id);
@@ -34,13 +35,17 @@ function check(manual = false):Promise<void> {
   pendingCheck = task; lastCheck = Date.now();
   task.promise = (async () => {
     try {
-      const receipt = await checkInvitation(task.id);
+      const receipt = await checkInvitation(task.id, controller?.signal);
       if (!currentCheck(task)) return;
       if (receipt.state === "registered" && receipt.node_id) {
         if (!await loadState(true)) throw new Error("无法读取设备配置，请再次检查。");
         if (!currentCheck(task)) return;
         if (!state.nodes.some(node => node.node_id === receipt.node_id && node.state === "approved")) throw new Error("设备已移除，请重新添加。");
-        dialog.value!.close(); clearInvitation(); attempt.value = undefined;
+        // Registration already consumed this invitation. Finish without aborting
+        // its lifecycle or sending a cancellation for the successful attempt.
+        controller = undefined;
+        clearInvitation(task.id); attempt.value = undefined;
+        close(); dialog.value!.close();
         emit("registered", receipt.node_id); return;
       }
       if (receipt.state === "closed") { closed.value = true; clearInvitation(); message.value = "指令已失效，请重新添加设备。"; }
@@ -65,20 +70,30 @@ function tick() {
 }
 function stopTimer() { clearInterval(timer); timer = undefined; }
 function close() {
+  controller?.abort(); controller = undefined;
+  if (attempt.value) clearInvitation(attempt.value.id);
+  attempt.value = undefined; closed.value = true;
   stopTimer(); generation++; pendingCheck = undefined; manualChecking.value = false; creating.value = false;
 }
-onUnmounted(() => { disposed = true; close(); });
+function dismiss() { close(); dialog.value?.close(); }
+function backdrop(event: MouseEvent) {
+  if (event.target !== dialog.value) return;
+  const bounds = dialog.value.getBoundingClientRect();
+  if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) dismiss();
+}
+onMounted(() => window.addEventListener("pagehide", dismiss));
+onUnmounted(() => { disposed = true; window.removeEventListener("pagehide", dismiss); close(); });
 async function open() {
   if (creating.value || dialog.value?.open || disposed) return;
   const version = ++generation;
+  const lifecycle = new AbortController(); controller = lifecycle;
+  creating.value = true; attempt.value = undefined; closed.value = false;
   now.value = Date.now(); copied.value = ""; copyError.value = ""; message.value = "";
   await nextTick(); if (disposed || version !== generation) return;
   dialog.value?.showModal();
   stopTimer(); timer = setInterval(tick, 1000);
-  if (attempt.value && !closed.value) { await check(); if (!currentDialog(version)) return; }
-  creating.value = true;
   try {
-    const invitation = await createInvitation(state.network);
+    const invitation = await createInvitation(state.network, lifecycle.signal);
     if (!currentDialog(version)) return;
     attempt.value = { ...invitation }; now.value = Date.now(); closed.value = false; lastCheck = now.value;
   } catch (error) { if (currentDialog(version)) copyError.value = (error as Error).message; }
@@ -94,8 +109,8 @@ async function copyCommand(kind: "unix" | "installed") {
 defineExpose({ open });
 </script>
 <template>
-  <dialog ref="dialog" class="dialog join-dialog" aria-labelledby="join-heading" @close="close">
-    <div class="dialog-heading"><h2 id="join-heading">添加设备</h2><button type="button" class="button-quiet" aria-label="关闭添加设备" @click="dialog?.close()">✕</button></div>
+  <dialog ref="dialog" class="dialog join-dialog" aria-labelledby="join-heading" @close="!dialog?.open && close()" @cancel.prevent="dismiss" @click="backdrop">
+    <div class="dialog-heading"><h2 id="join-heading">添加设备</h2><button type="button" class="button-quiet" aria-label="关闭添加设备" @click="dismiss">✕</button></div>
     <div class="join-content">
     <p class="muted">在设备上执行指令即可加入。有效 5 分钟，仅限一台设备。</p>
     <section v-if="commands.windows.length" class="install-section">

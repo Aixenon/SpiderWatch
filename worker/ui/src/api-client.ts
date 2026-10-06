@@ -20,12 +20,13 @@ const errors: Record<string, string> = {
   updates_disabled: "本网络尚未启用更新分发。", update_temporarily_unavailable: "更新服务暂时不可用，请稍后重试。",
   temporarily_unavailable: "服务暂时不可用，请稍后重试。", too_many_viewers: "实时观看人数已达上限，请稍后重试。",
 };
-export async function request<T = unknown>(path: string, method = "GET", body?: unknown): Promise<T> {
+export async function request<T = unknown>(path: string, method = "GET", body?: unknown, options: Pick<RequestInit, "keepalive" | "signal"> = {}): Promise<T> {
   const url = path.startsWith("/panel/api/") ? path : "/panel/api" + (path.startsWith("/") ? path : "/" + path);
   const isSession = url === "/panel/api/session";
   if (!isSession && !access.valid()) throw new APIError("请先登录。", "login_required");
   const generation = access.generation();
   const response = await fetch(url, {
+    ...options,
     method, credentials: "same-origin", redirect: "manual", cache: "no-store",
     headers: body === undefined ? {} : { "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),

@@ -19,7 +19,7 @@ export type NodeMetrics = {
 export type Node = {
   node_id: string; name: string; nickname: string; icon: DeviceIconID; group_id: string | null;
   state: "approved" | "pending" | "revoked"; auto_update: boolean; connected: boolean; last_seen: number;
-  host: { hostname: string; os: string; arch: string; cpus: number; physical_cpus?: number; cpu_model?: string; kernel?: string; agent_version: string; ip?: string };
+  host: { hostname: string; os: string; arch: string; cpus: number; physical_cpus?: number; logical_cpus?: number; cpu_model?: string; kernel?: string; agent_version: string; ip?: string };
   metrics: NodeMetrics; series: Point[];
 };
 type StateResponse = { group: string; settings: Settings; node_groups: Group[]; nodes: Omit<Node, "series">[] };
