@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rename, rm } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
+import { dirname, isAbsolute, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { verifyClientRelease } from './client-assets.mjs';
@@ -8,6 +8,7 @@ import { verifyClientRelease } from './client-assets.mjs';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const platforms = JSON.parse(await readFile(resolve(root, 'client/internal/agent/platforms.json'), 'utf8'));
 const buildLimit = 18 * 60 * 1000;
+const goVersion = 'go1.26.0';
 
 export function run(command, args, { cwd = root, env = process.env, capture = false, signal } = {}) {
   return new Promise((accept, reject) => {
@@ -42,6 +43,17 @@ function argumentsFor(argv) {
   return result;
 }
 
+export async function resolveGoToolchain(execute, environment, signal) {
+  const bootstrap = { ...environment, GOTOOLCHAIN: goVersion, GOEXPERIMENT: '', GOENV: 'off', GOWORK: 'off' };
+  for (const key of ['GOROOT', 'GOOS', 'GOARCH', 'GOARM', 'GOARM64', 'GOAMD64', 'GO386', 'GOMIPS', 'GOMIPS64', 'GOPPC64', 'GORISCV64']) delete bootstrap[key];
+  // The old host launcher must not parse experiments introduced by the selected toolchain.
+  const toolchain = JSON.parse(await execute(environment.GO || 'go', ['env', '-json', 'GOROOT', 'GOVERSION'], { env: bootstrap, signal, capture: true }));
+  if (toolchain.GOVERSION !== goVersion || typeof toolchain.GOROOT !== 'string' || !isAbsolute(toolchain.GOROOT)) {
+    throw new Error(`Unable to resolve the required ${goVersion} compiler`);
+  }
+  return { GO: resolve(toolchain.GOROOT, 'bin', process.platform === 'win32' ? 'go.exe' : 'go'), GOROOT: toolchain.GOROOT, GOTOOLCHAIN: 'local', GOENV: 'off' };
+}
+
 export async function main(argv = process.argv.slice(2), options = {}) {
   const env = options.env || process.env;
   const execute = options.run || run;
@@ -63,14 +75,15 @@ export async function main(argv = process.argv.slice(2), options = {}) {
   const staging = await mkdtemp(resolve(stagingRoot, 'clients-'));
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new Error('Client build exceeded 18 minutes')), buildLimit);
-  const environment = { ...env, GOTOOLCHAIN: 'go1.26.0', GOCACHE: resolve(cache, 'go-build'), GOMODCACHE: resolve(cache, 'go-mod'), GOMAXPROCS: '1', GOFLAGS: '-p=1' };
+  const environment = { ...env, GOCACHE: resolve(cache, 'go-build'), GOMODCACHE: resolve(cache, 'go-mod'), GOMAXPROCS: '1', GOFLAGS: '-p=1' };
   const step = (command, values, extra = {}) => execute(command, values, { env: environment, signal: controller.signal, ...extra });
   try {
     const tools = JSON.parse(await step(python, [resolve(root, 'client/scripts/bootstrap_nsis.py'), '--cache', resolve(cache, 'tools')], { capture: true }));
     if (!tools.compiler || !tools.directory) throw new Error('Native installer compiler is unavailable');
     environment.MAKENSIS = tools.compiler;
     environment.NSISDIR = tools.directory;
-    await step(env.GO || 'go', ['version']);
+    Object.assign(environment, await resolveGoToolchain(execute, environment, controller.signal));
+    await step(environment.GO, ['version']);
     const shared = ['--version', version, '--revision', revision, '--output', staging, '--repository', repository];
     let next = 0;
     const worker = async () => {

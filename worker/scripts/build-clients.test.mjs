@@ -3,12 +3,14 @@ import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import test from 'node:test';
-import { main } from './build-clients.mjs';
+import { main, resolveGoToolchain } from './build-clients.mjs';
 import { makeClientReleaseFixture } from './client-assets-fixture.mjs';
 
 const revision = 'b'.repeat(40);
 const repository = 'example/PrivateMonitor';
 const value = (args, key) => args[args.indexOf(key) + 1];
+const toolchainRoot = resolve(tmpdir(), 'go1.26.0');
+const goEnvironment = JSON.stringify({ GOROOT: toolchainRoot, GOVERSION: 'go1.26.0' });
 
 async function fixture(t) {
   const directory = await mkdtemp(resolve(tmpdir(), 'spider-native-build-'));
@@ -22,7 +24,8 @@ test('builds all targets with at most two jobs and publishes only a complete ver
   const calls = [];
   let active = 0, peak = 0;
   const runner = async (command, args, options) => {
-    calls.push({ command, args, env: options.env });
+    calls.push({ command, args, env: { ...options.env } });
+    if (args[0] === 'env') return goEnvironment;
     if (args[0]?.endsWith('bootstrap_nsis.py')) return JSON.stringify({ compiler: '/tools/bin/makensis', directory: '/tools/nsis' });
     if (args.includes('--target')) {
       active++; peak = Math.max(peak, active);
@@ -37,7 +40,9 @@ test('builds all targets with at most two jobs and publishes only a complete ver
   const targets = calls.filter(call => call.args.includes('--target'));
   assert.equal(new Set(targets.map(call => value(call.args, '--target'))).size, 19);
   for (const call of targets) {
-    assert.equal(call.env.GOTOOLCHAIN, 'go1.26.0');
+    assert.equal(call.env.GOTOOLCHAIN, 'local');
+    assert.equal(call.env.GO, resolve(toolchainRoot, 'bin', process.platform === 'win32' ? 'go.exe' : 'go'));
+    assert.equal(call.env.GOROOT, toolchainRoot);
     assert.equal(call.env.GOMAXPROCS, '1');
     assert.equal(call.env.GOFLAGS, '-p=1');
     assert.equal(call.env.GOCACHE, resolve(f.directory, 'cache/go-build'));
@@ -59,6 +64,7 @@ test('failed compiler preserves the previous release and skips installers and as
   const calls = [];
   const runner = async (command, args) => {
     calls.push(args);
+    if (args[0] === 'env') return goEnvironment;
     if (args[0]?.endsWith('bootstrap_nsis.py')) return '{"compiler":"/tools/makensis","directory":"/tools"}';
     if (args.includes('--target')) throw new Error('Cross compiler failed');
     return '';
@@ -73,6 +79,7 @@ test('failed compiler preserves the previous release and skips installers and as
 test('a missing installer prevents publishing even if the tool exits successfully', async t => {
   const f = await fixture(t);
   const runner = async (command, args) => {
+    if (args[0] === 'env') return goEnvironment;
     if (args[0]?.endsWith('bootstrap_nsis.py')) return '{"compiler":"/tools/makensis","directory":"/tools"}';
     if (args.includes('--assemble')) {
       const staging = value(args, '--output');
@@ -92,4 +99,27 @@ test('rejects invalid identity before bootstrapping downloaded tools', async t =
   f.argv[f.argv.indexOf('--revision') + 1] = '../wrong';
   await assert.rejects(main(f.argv, { env: f.env, run: async () => { invoked = true; } }), /Invalid client build identity/);
   assert.equal(invoked, false);
+});
+
+test('the old Go launcher only resolves the new host toolchain without target experiments', async () => {
+  const inherited = { GO: '/host/go1.24.3', GOEXPERIMENT: 'nojsonv2', GOROOT: '/old/go', GOOS: 'windows', GOARCH: 'arm64', GOARM: '7', GOTOOLCHAIN: 'auto' };
+  const selected = await resolveGoToolchain(async (command, args, options) => {
+    assert.equal(command, '/host/go1.24.3');
+    assert.deepEqual(args, ['env', '-json', 'GOROOT', 'GOVERSION']);
+    assert.equal(options.env.GOTOOLCHAIN, 'go1.26.0');
+    assert.equal(options.env.GOEXPERIMENT, '');
+    assert.equal(options.env.GOENV, 'off');
+    assert.equal(options.env.GOWORK, 'off');
+    for (const key of ['GOROOT', 'GOOS', 'GOARCH', 'GOARM']) assert.equal(options.env[key], undefined);
+    return goEnvironment;
+  }, inherited);
+  assert.equal(selected.GOTOOLCHAIN, 'local');
+  assert.equal(selected.GO, resolve(toolchainRoot, 'bin', process.platform === 'win32' ? 'go.exe' : 'go'));
+  assert.equal(inherited.GOEXPERIMENT, 'nojsonv2');
+});
+
+test('toolchain resolution rejects the old compiler and an invalid compiler location', async () => {
+  for (const environment of [{ GOROOT: toolchainRoot, GOVERSION: 'go1.24.3' }, { GOROOT: 'relative/path', GOVERSION: 'go1.26.0' }]) {
+    await assert.rejects(resolveGoToolchain(async () => JSON.stringify(environment), {}), /required go1.26.0/);
+  }
 });

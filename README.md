@@ -59,24 +59,25 @@ Cloudflare Workers + SQLite Durable Objects 网络监控面板，配套单文件
 
 保持 Worker 名称和 `MONITOR_GROUP` 不变，设备身份与设置会保留。每次默认分支发布都会同步全部客户端静态文件，创建 GitHub Release 是可选的归档步骤。
 
-本地部署备选（Node.js 22 或更新版本）：先将同一提交的 **SpiderWatch builds** 的 `spider-watch-release` 产物解压到 `client/dist`，再执行：
+GitHub 只保存源码，不运行 Actions 编译或部署。客户端、Windows 安装包、前端和 Worker 全部在 Cloudflare 构建并发布。
+
+本地部署备选：Linux 上准备 Node.js 22 或更新版本、Go、Python 3、C++ 编译工具和 zlib 开发库，在仓库根目录执行：
 
 ```sh
-cd worker
 npm ci
-npx wrangler login
-npm run deploy
+npm --prefix worker exec -- wrangler login
+npm run deploy -- --build-clients
 ```
 
 本地部署使用同一流程；缺少平台、文件校验失败或产物不属于当前提交时会拒绝发布，避免清空已上线的安装文件。多账户环境需指定 `CLOUDFLARE_ACCOUNT_ID`，已有非默认名称的 Worker 需指定 `WORKER_NAME`。域名和 GitHub 登录配置仍在 Cloudflare 控制台管理。
 
-Linux 上已安装 Go、Python 3、C++ 编译工具和 zlib 开发库时，也可在仓库根目录运行 `npm run build:clients` 编译全部客户端。GitHub Actions 使用同一入口做多平台检查、Windows 安装卸载验证及可选 Release 发布，不参与 Cloudflare 部署。
+仅编译客户端可运行 `npm run build:clients`，产物保存在 `client/dist`；编译结果不会提交到仓库。
 
 ## 发布与安装客户端
 
 普通提交自动编译并同步到 Worker，无需先创建 Release。客户端版本维护在 `client/VERSION`；构建同时记录源码提交，设备可识别同一版本号下的新构建，已运行相同构建时不会重复下载。
 
-如需正式 GitHub Release，推送与 `client/VERSION` 一致的稳定标签，例如 `v0.7.1`。发布失败时保留草稿，可重跑；已发布版本不覆盖，需要新标签。私有仓库的 Release 仍然私有，不影响 Worker 安装和更新。
+GitHub Release 可手动归档，不参与编译、部署或设备下载。私有仓库及其 Release 保持私有。
 
 ### 平台
 
