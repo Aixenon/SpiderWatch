@@ -29,7 +29,12 @@ it("offers a GitHub login page without exposing protected resources or fetching 
     expect(response.status).toBe(401);
   }
   const page = await worker.fetch(new Request(origin + "/panel/", { headers: { Accept: "text/html" } }), githubSettings());
-  expect(await page.text()).toContain("使用 GitHub 登录");
+  const html = await page.text();
+  expect(html).toContain('<main class="login-entry"><header>SpiderWatch<small>NETWORK MONITOR</small></header>');
+  expect(html).toContain('<a class="github-login" href="/panel/auth/login">');
+  expect(html).toContain('viewBox="0 0 16 16"');
+  expect(html.match(/使用 GitHub 登录/g)).toHaveLength(1);
+  for (const value of ["<h1>", "<p>", "使用 GitHub 账户登录", "重试"]) expect(html).not.toContain(value);
   expect(storage).not.toHaveBeenCalled(); expect(assets).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled();
 });
 
