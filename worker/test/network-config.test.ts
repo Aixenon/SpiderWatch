@@ -8,7 +8,7 @@ const origin = "http://127.0.0.1", id = "d".repeat(32), key = "e".repeat(64);
 const host = { hostname: "existing-computer", os: "windows", arch: "amd64", cpus: 2, agent_version: "0.3.0" };
 const stub = () => env.MONITOR.getByName(env.MONITOR_GROUP);
 async function request(path: string, method = "GET", body?: unknown): Promise<Response> {
-  const response = await worker.fetch(new Request(origin + path, { method,
+  const response = await worker.fetch(new Request(origin + (path.startsWith("/api/") ? "/panel" + path : path), { method,
     headers: { ...(path.endsWith("/enroll") ? await invitationHeaders() : {}), Origin: origin, "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   }), env);

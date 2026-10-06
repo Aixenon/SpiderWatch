@@ -9,7 +9,7 @@ const host = { hostname: "gzip-node", os: "linux", arch: "arm", cpus: 1, agent_v
 const clients = new Set<WebSocket>();
 const stub = () => env.MONITOR.getByName(env.MONITOR_GROUP);
 async function request(path: string, method = "GET", body?: unknown, extra = {}) {
-  const response = await worker.fetch(new Request(origin + path, { method, headers: { ...(path.endsWith("/enroll") ? await invitationHeaders() : {}), Origin: origin, "Content-Type": "application/json", ...extra }, body: body === undefined ? undefined : JSON.stringify(body) }), env);
+  const response = await worker.fetch(new Request(origin + (path.startsWith("/api/") ? "/panel" + path : path), { method, headers: { ...(path.endsWith("/enroll") ? await invitationHeaders() : {}), Origin: origin, "Content-Type": "application/json", ...extra }, body: body === undefined ? undefined : JSON.stringify(body) }), env);
   if (response.status === 101) return response;
   return new Response(await response.arrayBuffer(), { status: response.status, headers: response.headers });
 }

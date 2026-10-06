@@ -10,7 +10,7 @@ const headers = {"X-Monitor-Node-ID":id,Authorization:"Bearer "+key};
 const clients = new Set<WebSocket>();
 const stub = () => env.MONITOR.getByName(env.MONITOR_GROUP);
 async function request(path:string, method="GET", body?:unknown, extra={}) {
-  const r = await worker.fetch(new Request(origin+path,{method,headers:{...(path.endsWith("/enroll") ? await invitationHeaders() : {}),Origin:origin,"Content-Type":"application/json",...extra},body:body===undefined?undefined:JSON.stringify(body)}),env);
+  const r = await worker.fetch(new Request(origin+(path.startsWith("/api/") ? "/panel"+path : path),{method,headers:{...(path.endsWith("/enroll") ? await invitationHeaders() : {}),Origin:origin,"Content-Type":"application/json",...extra},body:body===undefined?undefined:JSON.stringify(body)}),env);
   return r.status===101?r:new Response(await r.arrayBuffer(),{status:r.status,headers:r.headers});
 }
 function receive(ws:WebSocket,type:string):Promise<any> {

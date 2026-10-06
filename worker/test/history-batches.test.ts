@@ -11,7 +11,7 @@ const stub=()=>env.MONITOR.getByName(env.MONITOR_GROUP),nodeID=(index:number)=>i
 type HistoryResponse={points:ResourcePoint[];from:number;to:number;raw_points:number;resolution_seconds:number};
 type Internal={historyWindow:HistoryWindow|null;flushHistory(now:number,force?:boolean):void};
 async function request(path:string,method="GET",body?:unknown,headers:HeadersInit={}) {
-  const response=await worker.fetch(new Request(origin+path,{method,headers:{Origin:origin,"Content-Type":"application/json",...headers},body:body===undefined?undefined:JSON.stringify(body)}),env);
+  const response=await worker.fetch(new Request(origin+(path.startsWith("/api/") ? "/panel"+path : path),{method,headers:{Origin:origin,"Content-Type":"application/json",...headers},body:body===undefined?undefined:JSON.stringify(body)}),env);
   return response.status===101?response:new Response(await response.arrayBuffer(),{status:response.status,headers:response.headers});
 }
 function receive(ws:WebSocket,type:string):Promise<Record<string,unknown>> {

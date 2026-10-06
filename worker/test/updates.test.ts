@@ -23,7 +23,7 @@ async function setDOEnv(settings = configured()) {
   });
 }
 function makeRequest(path: string, method = "GET", body?: unknown) {
-  return new Request(path.startsWith("http") ? path : origin + path, { method,
+  return new Request(path.startsWith("http") ? path : origin + (path.startsWith("/api/") ? "/panel" + path : path), { method,
     headers: { Origin: origin, "Content-Type": "application/json", "CF-Access-Client-Id": "must-stay-local", "CF-Access-Client-Secret": "must-stay-local", "X-Monitor-Node-ID":"a".repeat(32), Authorization: "Bearer " + "b".repeat(64), "cf-access-jwt-assertion": "must-stay-local" },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
@@ -177,8 +177,8 @@ it("isolates both network settings and cached source repositories", async () => 
 it("guards Access, Origin, internal paths, old static downloads and unsafe configuration", async () => {
   const remote = github(), monitor = vi.spyOn(env.MONITOR, "getByName").mockImplementation(() => { throw new Error("should not reach DO"); });
   const production = { ...configured(), LOCAL_DEV: "false", ACCESS_TEAM_DOMAIN: "https://updates-test.cloudflareaccess.com", ACCESS_AGENT_AUD: "agent", ACCESS_PANEL_AUD: "panel", ADMIN_EMAILS: "owner@example.test" };
-  for (const path of ["/api/updates/config", "/v1/update/check", "/v1/updates/agent/stable/manifest.json"]) expect((await request("https://monitor.example.test" + path, "GET", undefined, production)).status).toBe(401);
-  expect((await worker.fetch(new Request(origin + "/api/updates/config", { method: "PUT", headers: { Origin: "https://attacker.invalid" }, body: "{}" }), configured())).status).toBe(403);
+  for (const path of ["/panel/api/updates/config", "/v1/update/check", "/v1/updates/agent/stable/manifest.json"]) expect((await request("https://monitor.example.test" + path, "GET", undefined, production)).status).toBe(401);
+  expect((await worker.fetch(new Request(origin + "/panel/api/updates/config", { method: "PUT", headers: { Origin: "https://attacker.invalid" }, body: "{}" }), configured())).status).toBe(403);
   for (const path of ["/internal/update-config", "/internal/update-state", "/agent-releases", "/agent-releases/index.json"]) expect((await request(path)).status).toBe(404);
   for (const path of ["../secret", "/absolute", "agent//stable", "Agent/Stable", "https://example.test", "api/files", "a".repeat(65)]) expect((await enable(path)).status).toBe(400);
   expect((await enable("agent/stable", { ...env, UPDATE_GITHUB_REPOSITORY: "" })).status).toBe(503);

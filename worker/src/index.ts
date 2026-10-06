@@ -10,14 +10,52 @@ function hasDeviceCredentials(request: Request): boolean {
     && /^Bearer [a-f0-9]{64}$/.test(request.headers.get("Authorization") || "");
 }
 
+function reservedPanelPath(path: string): boolean {
+  // Classification belongs to the public URL, before the panel prefix is
+  // removed. No panel URL can enter a device or internal authentication path.
+  try { path = decodeURIComponent(path); }
+  catch { return true; }
+  return path.startsWith("//") || path.includes("\\") || /^\/(?:v1|bootstrap|internal|agent-releases)(?:\/|$)/.test(path);
+}
+
+async function panelAsset(request: Request, env: Env): Promise<Response> {
+  const asset = await env.ASSETS.fetch(request);
+  const location = asset.headers.get("Location");
+  const redirect = asset.status >= 300 && asset.status < 400 && location !== null;
+  const html = asset.headers.get("Content-Type")?.includes("text/html");
+  if (!redirect && !html) return asset;
+  const headers = new Headers(asset.headers);
+  headers.set("Cache-Control", "private, no-store");
+  if (redirect) {
+    let target: URL;
+    try { target = new URL(location, request.url); }
+    catch { return json({ code: "invalid_asset_redirect" }, 502); }
+    if (target.origin !== new URL(request.url).origin || target.username || target.password) return json({ code: "invalid_asset_redirect" }, 502);
+    // ASSETS serves the existing physical root. Keep its canonical redirects
+    // inside the public panel mount rather than sending browsers to old URLs.
+    headers.set("Location", `/panel${target.pathname}${target.search}${target.hash}`);
+  }
+  return new Response(asset.body, { status: asset.status, statusText: asset.statusText, headers });
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname.startsWith("/internal/") || url.pathname === "/agent-releases" || url.pathname.startsWith("/agent-releases/")) return json({ code: "not_found" }, 404);
-    const bootstrap = url.pathname === "/bootstrap/enroll" || url.pathname === "/bootstrap/status";
-    const agent = url.pathname.startsWith("/v1/");
     const local = env.LOCAL_DEV === "true" && ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname);
     if (env.LOCAL_DEV === "true" && !local) return json({ code: "local_mode_requires_loopback" }, 403);
+    if (url.pathname === "/" || url.pathname === "/panel") {
+      if (!["GET", "HEAD"].includes(request.method)) return json({ code: "method_not_allowed" }, 405);
+      return new Response(null, { status: 302, headers: { Location: "/panel/", "Cache-Control": "no-store" } });
+    }
+    const panel = url.pathname.startsWith("/panel/");
+    const bootstrap = !panel && (url.pathname === "/bootstrap/enroll" || url.pathname === "/bootstrap/status");
+    const agent = !panel && url.pathname.startsWith("/v1/");
+    if (!panel && !bootstrap && !agent) return json({ code: "not_found" }, 404);
+    if (panel) {
+      url.pathname = url.pathname.slice("/panel".length);
+      if (reservedPanelPath(url.pathname)) return json({ code: "not_found" }, 404);
+      request = new Request(url, request);
+    }
     if ((bootstrap || agent) && !local && url.protocol !== "https:") return json({ code: "https_required" }, 400);
     const enrollment = url.pathname === "/bootstrap/enroll" || url.pathname === "/v1/enroll";
     if (enrollment && Number(request.headers.get("Content-Length")) > 32768) return json({ code: "payload_too_large" }, 413);
@@ -46,7 +84,7 @@ export default {
     if (auth instanceof Response) return !bootstrap && !agent && !url.pathname.startsWith("/api/") ? panelAuthFailure(request, auth) : auth;
     if (url.pathname === "/api/session" || url.pathname === "/auth/login") {
       if (request.method !== "GET") return json({ code: "method_not_allowed" }, 405);
-      if (url.pathname === "/auth/login") return new Response(null, { status: 302, headers: { Location: "/#/", "Cache-Control": "no-store" } });
+      if (url.pathname === "/auth/login") return new Response(null, { status: 302, headers: { Location: "/panel/#/", "Cache-Control": "no-store" } });
       // No DO or identity API lookup: expose only the already-verified identity.
       return json({ authenticated: true, email: "email" in auth ? auth.email : null, expires_at: auth.expires, mode: local ? "local" : "access" });
     }
@@ -62,11 +100,7 @@ export default {
       && !hasDeviceCredentials(request)) return json({ code: "device_auth_required" }, 401);
     if (!bootstrap && !agent && !url.pathname.startsWith("/api/")) {
       if (mutation) return json({ code: "method_not_allowed" }, 405);
-      const asset = await env.ASSETS.fetch(request);
-      if (!asset.headers.get("Content-Type")?.includes("text/html")) return asset;
-      const headers = new Headers(asset.headers);
-      headers.set("Cache-Control", "private, no-store");
-      return new Response(asset.body, { status: asset.status, statusText: asset.statusText, headers });
+      return panelAsset(request, env);
     }
     const headers = new Headers(request.headers);
     // Never trust a caller's copy of the authorization result.

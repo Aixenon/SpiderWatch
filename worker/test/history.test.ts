@@ -10,7 +10,7 @@ const host={hostname:"history-node",os:"linux",arch:"amd64",cpus:2,agent_version
 const stub=()=>env.MONITOR.getByName(env.MONITOR_GROUP), clients=new Set<WebSocket>();
 type HistoryResponse={points:ResourcePoint[];from:number;to:number;interval_seconds:number;resolution_seconds:number;raw_points:number};
 async function request(path:string,method="GET",headers:HeadersInit={}) {
-  const response=await worker.fetch(new Request(origin+path,{method,headers:{Origin:origin,...headers}}),env);
+  const response=await worker.fetch(new Request(origin+(path.startsWith("/api/") ? "/panel"+path : path),{method,headers:{Origin:origin,...headers}}),env);
   return response.status===101?response:new Response(await response.arrayBuffer(),{status:response.status,headers:response.headers});
 }
 async function seed(seen=0,metrics:unknown={}) {
@@ -28,7 +28,7 @@ function receive(ws:WebSocket,type:string):Promise<Record<string,unknown>> {
   });
 }
 async function settings(idle:number) {
-  const response=await worker.fetch(new Request(origin+"/api/settings",{method:"PUT",headers:{Origin:origin,"Content-Type":"application/json"},body:JSON.stringify({active_seconds:5,idle_seconds:idle})}),env);
+  const response=await worker.fetch(new Request(origin+"/panel/api/settings",{method:"PUT",headers:{Origin:origin,"Content-Type":"application/json"},body:JSON.stringify({active_seconds:5,idle_seconds:idle})}),env);
   expect(response.status).toBe(200);await response.arrayBuffer();
 }
 async function agent() {
@@ -49,7 +49,7 @@ afterEach(async()=>{for(const ws of clients){try{ws.close(1000);}catch{}}clients
 it("keeps history behind panel identity even with forged role/device headers",async()=>{
   const storage=vi.spyOn(env.MONITOR,"getByName");
   const configured={...env,LOCAL_DEV:"false",ACCESS_TEAM_DOMAIN:"https://history-test.cloudflareaccess.com",ACCESS_PANEL_AUD:"panel",ADMIN_EMAILS:"owner@example.test"};
-  const response=await worker.fetch(new Request(`https://monitor.example.test/api/nodes/${id}/history?range=300`,{headers:{"X-Monitor-Role":"admin","X-Monitor-Auth-Expires":String(Date.now()+3600_000),"X-Monitor-Node-ID":id,Authorization:"Bearer "+key}}),configured);
+  const response=await worker.fetch(new Request(`https://monitor.example.test/panel/api/nodes/${id}/history?range=300`,{headers:{"X-Monitor-Role":"admin","X-Monitor-Auth-Expires":String(Date.now()+3600_000),"X-Monitor-Node-ID":id,Authorization:"Bearer "+key}}),configured);
   expect(response.status).toBe(401);expect(response.headers.get("Cache-Control")).toBe("no-store");expect(storage).not.toHaveBeenCalled();
 });
 

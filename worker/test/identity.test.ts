@@ -34,7 +34,7 @@ async function consume(request: Request) {
   return r.status===101 ? r : new Response(await r.arrayBuffer(),{status:r.status,headers:r.headers});
 }
 async function admin(path:string, method="GET") {
-  return consume(new Request(origin+path,{method,headers:{Origin:origin}}));
+  return consume(new Request(origin+"/panel"+path,{method,headers:{Origin:origin}}));
 }
 async function invite() {
   const r = await admin("/api/invitations","POST"); expect(r.status).toBe(200);

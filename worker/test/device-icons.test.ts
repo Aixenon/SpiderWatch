@@ -10,7 +10,7 @@ const host = { hostname: "icon-test-computer", os: "windows", arch: "amd64", cpu
 const stub = () => env.MONITOR.getByName(env.MONITOR_GROUP);
 type StateNode = { node_id: string; name: string; nickname: string; icon: DeviceIcon; group_id: string | null; state: string };
 async function request(path: string, method = "GET", body?: unknown): Promise<Response> {
-  const response = await worker.fetch(new Request(origin + path, { method,
+  const response = await worker.fetch(new Request(origin + (path.startsWith("/api/") ? "/panel" + path : path), { method,
     headers: { ...(path.endsWith("/enroll") ? await invitationHeaders() : {}), Origin: origin, "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   }), env);

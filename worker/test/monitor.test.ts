@@ -12,7 +12,7 @@ const id = "1".repeat(32), key = "2".repeat(64);
 const clients = new Set<WebSocket>();
 const stub = () => env.MONITOR.getByName(env.MONITOR_GROUP);
 async function request(path: string, method = "GET", body?: unknown, headers?: HeadersInit) {
-  const response = await worker.fetch(new Request(origin + path, { method, headers: { ...(path.endsWith("/enroll") ? await invitationHeaders() : {}), Origin: origin, ...(body ? { "Content-Type": "application/json" } : {}), ...headers }, body: body ? JSON.stringify(body) : undefined }), env);
+  const response = await worker.fetch(new Request(origin + (path.startsWith("/api/") ? "/panel" + path : path), { method, headers: { ...(path.endsWith("/enroll") ? await invitationHeaders() : {}), Origin: origin, ...(body ? { "Content-Type": "application/json" } : {}), ...headers }, body: body ? JSON.stringify(body) : undefined }), env);
   // Consume the DO response before eviction; an unread response keeps its
   // original request in flight, which a graceful eviction must wait for.
   if (response.status === 101) return response;
@@ -142,7 +142,7 @@ describe("monitor contracts in the Workers runtime", () => {
   it("rejects cross-origin panel mutation and WebSocket connections",async()=>{
     expect((await request("/api/settings","PUT",{active_seconds:5,idle_seconds:600},{Origin:"https://attacker.invalid"})).status).toBe(403);
     expect((await request("/api/live","GET",undefined,{Upgrade:"websocket",Origin:"https://attacker.invalid"})).status).toBe(403);
-    expect((await worker.fetch(new Request("https://public.invalid/api/state"),env)).status).toBe(403);
+    expect((await worker.fetch(new Request("https://public.invalid/panel/api/state"),env)).status).toBe(403);
   });
   it("coordinates twenty independent agents and pushes a live report for every device",async()=>{
     const agents:WebSocket[]=[];

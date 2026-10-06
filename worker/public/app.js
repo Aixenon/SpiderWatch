@@ -17,7 +17,7 @@ const panelRefresh = createPanelRefresh(loadState,{enabled:()=>hasSession()&&!do
 const nodeRows = new Map();
 const nodePanels = new Map();
 const resourceHistory = new Map();
-const storedHistory = createHistoryCache((id,range)=>api(`/api/nodes/${encodeURIComponent(id)}/history?range=${range}`));
+const storedHistory = createHistoryCache((id,range)=>api(`/panel/api/nodes/${encodeURIComponent(id)}/history?range=${range}`));
 const groupRows = new Map();
 let currentInvitation = null, invitationBusy = false, invitationCopied = false, lastInvitationCheck = 0, invitationChecking = false, invitationClosed = false;
 let page = "overview", configNodeId = null, configIcon = "server", configBusy = false, groupBusy = false;
@@ -49,12 +49,12 @@ const updateErrors = {
 };
 function notice(text, error = false) { $("notice").textContent = text; $("notice").className = error ? "error" : ""; $("notice").hidden = !text; }
 async function api(path, method="GET", body) {
-  if (path !== "/api/session" && !hasSession()) throw new Error("请先登录。");
+  if (path !== "/panel/api/session" && !hasSession()) throw new Error("请先登录。");
   const r = await fetch(path, { method, credentials:"same-origin", redirect:"manual", cache:"no-store", headers:body ? {"Content-Type":"application/json"} : {}, body:body ? JSON.stringify(body) : undefined });
   if (r.type === "opaqueredirect" || r.redirected || r.headers.get("Content-Type")?.includes("text/html")) { lockPanel("access_required"); throw new Error("请重新登录。"); }
   const result = await r.json();
   if (r.status === 401 || result.code === "admin_required" || result.code === "access_not_configured") { lockPanel(result.code); throw new Error($("login-description").textContent); }
-  if (path !== "/api/session" && authLocked) throw new Error("请先登录。");
+  if (path !== "/panel/api/session" && authLocked) throw new Error("请先登录。");
   if (!r.ok) { const error = new Error(updateErrors[result.code] || ({ invalid_settings:"观看间隔需为 2–300 秒，无人观看间隔需为 30–86400 秒，且不小于观看间隔。", invalid_node_group:"分组名称需为 1–64 个字符。", invalid_nickname:"名字最多 128 个字符，不能包含控制字符。", invalid_icon:"请选择列表中的设备图标。", invalid_group_members:"请选择有效的设备分组。", group_name_exists:"已有同名分组。", too_many_groups:"最多支持 50 个分组。", node_group_not_found:"分组已删除，请刷新。", node_not_found:"设备已删除，请刷新。", admin_required:"此账户没有管理权限。" })[result.code] || `操作失败：${result.code || r.status}`); error.code=result.code; error.retryAfterSeconds=Number(result.retry_after_seconds)||0; throw error; }
   return result;
 }
@@ -139,7 +139,7 @@ $("node-delete-form").addEventListener("submit",async e=>{
   const node=state?.nodes.find(n=>n.node_id===deleteNodeId);
   if(deleteBusy||!node||$("delete-name").value!==node.name)return;
   deleteBusy=true;deleteNotice("");refreshDelete();
-  try{await api(`/api/nodes/${node.node_id}`,"DELETE");closeDelete(true);notice(`${node.name} 已删除。`);await load(true);}
+  try{await api(`/panel/api/nodes/${node.node_id}`,"DELETE");closeDelete(true);notice(`${node.name} 已删除。`);await load(true);}
   catch(error){deleteNotice(error.message);}
   finally{deleteBusy=false;refreshDelete();}
 });
@@ -182,14 +182,14 @@ async function loadQuota(fresh=false) {
   const now=Date.now(),day=new Date(now).toISOString().slice(0,10);
   if(!hasSession()||page!=="settings"||document.hidden||quotaBusy||(!fresh&&quotaNext>now&&quotaDay===day))return;
   quotaBusy=true;$("quota-status").textContent="正在读取";
-  try{const data=await api("/api/quota");quotaNext=data.retry_at;quotaDay=data.day;renderQuota(data);}
+  try{const data=await api("/panel/api/quota");quotaNext=data.retry_at;quotaDay=data.day;renderQuota(data);}
   catch{quotaNext=now+300000;quotaDay=day;$("quota-status").textContent="读取失败";$("quota").replaceChildren();$("quota-updated").textContent="尚未取得用量";$("quota-message").textContent="暂时无法读取用量，请稍后重试。";$("quota-message").hidden=false;}
   finally{quotaBusy=false;}
 }
 function load(fresh=false) { return panelRefresh.load(fresh); }
 async function loadState() {
   try {
-    const data=await api("/api/state?view=live");state=data;settings(data.settings);$("group").textContent=`监控网络：${data.group}`;$("network-code").textContent=data.group;$("network-device-count").textContent=String(data.nodes.length);
+    const data=await api("/panel/api/state?view=live");state=data;settings(data.settings);$("group").textContent=`监控网络：${data.group}`;$("network-code").textContent=data.group;$("network-device-count").textContent=String(data.nodes.length);
     renderInvitations();
     groupOptions("group-filter",[["all","全部设备"],["ungrouped","未分组"]]);
     groupOptions("overview-group-filter",[["all","全部设备"],["ungrouped","未分组"]]);
@@ -204,14 +204,14 @@ function connection(text,online=false){$("connection").textContent=text;$("live-
 function stopLive(){clearTimeout(reconnect);clearInterval(heartbeat);if(socket){const old=socket;socket=null;old.close(1000,"panel not viewing");}connection("实时观看已暂停");}
 function connect(){
   if(!hasSession()||document.hidden||!livePage()||socket)return;
-  const ws=new WebSocket(`${location.protocol==="https:"?"wss:":"ws:"}//${location.host}/api/live`);socket=ws;connection("正在连接");
+  const ws=new WebSocket(`${location.protocol==="https:"?"wss:":"ws:"}//${location.host}/panel/api/live`);socket=ws;connection("正在连接");
   ws.onopen=()=>{if(socket!==ws)return;retry=0;connection("实时连接中",true);heartbeat=setInterval(()=>{if(ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify({type:"heartbeat"}));},30000);load();};
   ws.onmessage=event=>{if(socket!==ws)return;let msg;try{msg=JSON.parse(event.data);}catch{return;}if(msg.type==="settings")settings(msg.settings);else if(msg.type==="metrics"&&state){const n=state.nodes.find(n=>n.node_id===msg.node_id);if(n){n.metrics=msg.metrics;n.last_seen=msg.last_seen;n.connected=true;recordResourceSample(n);renderNode(n);if(page==="detail"&&location.hash.split("?")[0]===`#/server/${n.node_id}`)renderDetail();}}else if(msg.type==="refresh")load(true);else if(msg.type==="access_expired"){lockPanel("access_expired");}};
   ws.onclose=()=>{if(socket!==ws)return;socket=null;clearInterval(heartbeat);connection("连接中断，等待重连");if(!document.hidden&&livePage()){const delay=Math.min(60000,2000*2**Math.min(retry++,5));reconnect=setTimeout(connect,delay+Math.random()*1000);}};
   ws.onerror=()=>{if(socket===ws)connection("暂时无法连接");};
 }
 $("settings-form").addEventListener("input",()=>{dirty=true;});
-$("settings-form").addEventListener("submit",async e=>{e.preventDefault();$("save").disabled=true;try{const s=await api("/api/settings","PUT",inputSettings());dirty=false;settings(s);notice("更新间隔已保存。");await load(true);}catch(e){notice(e.message,true);}finally{$("save").disabled=false;}});
+$("settings-form").addEventListener("submit",async e=>{e.preventDefault();$("save").disabled=true;try{const s=await api("/panel/api/settings","PUT",inputSettings());dirty=false;settings(s);notice("更新间隔已保存。");await load(true);}catch(e){notice(e.message,true);}finally{$("save").disabled=false;}});
 $("refresh").addEventListener("click",()=>{load(true);loadQuota(true);});
 function invitationRemaining(invite,now=Date.now()) {
   const seconds=Math.max(0,Math.ceil((invite.expires_at-now)/1000));
@@ -232,7 +232,7 @@ async function checkInvitation(manual=false) {
   const id=currentInvitation.id;
   invitationChecking=true;lastInvitationCheck=Date.now();renderInvitations();
   try {
-    const result=await api(`/api/invitations/${id}`);
+    const result=await api(`/panel/api/invitations/${id}`);
     if(currentInvitation?.id!==id||!$("device-join").open)return;
     if(result.state==="registered") {
       if(!await load(true))throw new Error("无法读取设备配置，请再次检查。");
@@ -253,7 +253,7 @@ async function openInvitation() {
   invitationBusy=true;renderInvitations();
   try {
     if(!currentInvitation||invitationClosed||currentInvitation.expires_at<=Date.now()){
-      const data=await api("/api/invitations","POST");
+      const data=await api("/panel/api/invitations","POST");
       const localHTTP=location.protocol==="http:"&&["127.0.0.1","[::1]"].includes(location.hostname);
       currentInvitation={...data,command:`spider-watch configure --server "${data.server}" --join ${data.network}${localHTTP?" --allow-local-http":""}`};
       invitationClosed=false;lastInvitationCheck=Date.now();$("join-status").textContent="";
@@ -287,14 +287,14 @@ function renderIconPicker(){const picker=$("config-icons");picker.replaceChildre
 function openConfig(id){if(configBusy)return;const n=state?.nodes.find(n=>n.node_id===id);if(!n||n.state!=="approved")return;configNodeId=id;$("config-auto-update").checked=!!n.auto_update;$("node-update-notice").hidden=true;renderNodeUpdate();configIcon=normalizeDeviceIcon(n.icon);$("config-identity").textContent=`${n.name} · ID ${n.node_id}`;$("config-name").value=n.nickname||"";$("config-name").placeholder=n.host?.hostname||n.name;$("config-agent-version").textContent=`客户端版本：${n.host?.agent_version||"尚未上报"}`;groupOptions("config-group",[["","未分组"]]);$("config-group").value=n.group_id||"";renderIconPicker();configNotice("");$("node-config").showModal();$("config-name").focus();}
 function closeConfig(force=false){if(configBusy&&!force)return;if($("node-config").open)$("node-config").close();configNodeId=null;}
 $("close-config").addEventListener("click",()=>closeConfig());$("cancel-config").addEventListener("click",()=>closeConfig());$("node-config").addEventListener("close",()=>{configNodeId=null;});$("node-config").addEventListener("cancel",e=>{if(configBusy)e.preventDefault();});
-$("node-config-form").addEventListener("submit",async e=>{e.preventDefault();const id=configNodeId;if(!id||configBusy)return;const body={nickname:$("config-name").value,group_id:$("config-group").value||null,icon:normalizeDeviceIcon(configIcon),auto_update:$("config-auto-update").checked};configBusy=true;configNotice("");for(const control of $("node-config-form").querySelectorAll("button,input,select"))control.disabled=true;try{await api(`/api/nodes/${id}`,"PATCH",body);closeConfig(true);notice("设备配置已保存。");await load(true);}catch(error){configNotice(error.message,true);}finally{configBusy=false;for(const control of $("node-config-form").querySelectorAll("button,input,select"))control.disabled=false;}});
+$("node-config-form").addEventListener("submit",async e=>{e.preventDefault();const id=configNodeId;if(!id||configBusy)return;const body={nickname:$("config-name").value,group_id:$("config-group").value||null,icon:normalizeDeviceIcon(configIcon),auto_update:$("config-auto-update").checked};configBusy=true;configNotice("");for(const control of $("node-config-form").querySelectorAll("button,input,select"))control.disabled=true;try{await api(`/panel/api/nodes/${id}`,"PATCH",body);closeConfig(true);notice("设备配置已保存。");await load(true);}catch(error){configNotice(error.message,true);}finally{configBusy=false;for(const control of $("node-config-form").querySelectorAll("button,input,select"))control.disabled=false;}});
 function renderNodeUpdate(){ $("check-node-update").hidden=$("config-auto-update").checked; $("check-node-update").disabled=nodeUpdateChecking; }
 $("config-auto-update").addEventListener("change",()=>{renderNodeUpdate();$("node-update-notice").hidden=true;});
 $("check-node-update").addEventListener("click",async()=>{
   const id=configNodeId;if(!id||nodeUpdateChecking)return;
   nodeUpdateChecking=true;renderNodeUpdate();const message=$("node-update-notice");message.hidden=false;message.textContent="正在检查…";
   try {
-    const result=await api(`/api/nodes/${id}/update-check`,"POST");
+    const result=await api(`/panel/api/nodes/${id}/update-check`,"POST");
     if(configNodeId!==id||!$("node-config").open)return;
     message.textContent=result.available===true?`可更新至 ${result.version}，在设备上执行 spider-watch --update。`:result.available===false?"当前已是最新版本。":`可用版本 ${result.version}，设备当前版本未知。`;
   }catch(error){if(configNodeId===id&&$("node-config").open)message.textContent=error.message;}
@@ -310,8 +310,8 @@ function renderGroups(){
     if(!row){
       const form=addElement($("group-list"),"form","group-row"),label=addElement(form,"label","group-name","分组名称"),input=addElement(label,"input");input.maxLength=64;input.required=true;
       const members=addElement(label,"small","group-members"),actions=addElement(form,"div","group-actions"),rename=addElement(actions,"button","secondary","重命名"),remove=addElement(actions,"button","danger","删除");rename.type="submit";remove.type="button";
-      form.addEventListener("submit",e=>{e.preventDefault();const name=input.value.trim();if(!name){groupNotice("请填写分组名称。",true);return;}groupOperation(async()=>{await api(`/api/node-groups/${group.id}`,"PUT",{name});input.value=name;input.defaultValue=name;if(await load(true))groupNotice("分组名称已保存。");});});
-      remove.addEventListener("click",()=>{const current=state?.node_groups.find(g=>g.id===group.id);if(!current||!confirm(`删除分组「${current.name}」？设备将移至未分组。`))return;groupOperation(async()=>{await api(`/api/node-groups/${group.id}`,"DELETE");if(await load(true))groupNotice("分组已删除。");});});
+      form.addEventListener("submit",e=>{e.preventDefault();const name=input.value.trim();if(!name){groupNotice("请填写分组名称。",true);return;}groupOperation(async()=>{await api(`/panel/api/node-groups/${group.id}`,"PUT",{name});input.value=name;input.defaultValue=name;if(await load(true))groupNotice("分组名称已保存。");});});
+      remove.addEventListener("click",()=>{const current=state?.node_groups.find(g=>g.id===group.id);if(!current||!confirm(`删除分组「${current.name}」？设备将移至未分组。`))return;groupOperation(async()=>{await api(`/panel/api/node-groups/${group.id}`,"DELETE");if(await load(true))groupNotice("分组已删除。");});});
       row={form,input,members,rename,remove};groupRows.set(group.id,row);
     }
     if(row.input.value===row.input.defaultValue)row.input.value=group.name;row.input.defaultValue=group.name;
@@ -323,7 +323,7 @@ async function groupOperation(action){if(groupBusy)return;groupBusy=true;groupNo
 function closeGroups(force=false){if(groupBusy&&!force)return;if($("group-manager").open)$("group-manager").close();}
 $("manage-groups").addEventListener("click",()=>{if(!state||groupBusy)return;for(const row of groupRows.values())row.input.value=row.input.defaultValue;$("new-group").value="";groupNotice("");renderGroups();$("group-manager").showModal();$("new-group").focus();});
 $("close-groups").addEventListener("click",()=>closeGroups());$("group-manager").addEventListener("cancel",e=>{if(groupBusy)e.preventDefault();});
-$("create-group-form").addEventListener("submit",e=>{e.preventDefault();const name=$("new-group").value.trim();if(!name){groupNotice("请填写新分组名称。",true);return;}groupOperation(async()=>{await api("/api/node-groups","POST",{name});$("new-group").value="";if(await load(true))groupNotice("分组已创建。");});});
+$("create-group-form").addEventListener("submit",e=>{e.preventDefault();const name=$("new-group").value.trim();if(!name){groupNotice("请填写新分组名称。",true);return;}groupOperation(async()=>{await api("/panel/api/node-groups","POST",{name});$("new-group").value="";if(await load(true))groupNotice("分组已创建。");});});
 function livePage(){return page==="overview"||page==="detail";}
 function routePage(){const route=location.hash.split("?")[0];if(/^#\/server\/[a-f0-9]{32}$/.test(route))return "detail";if(route==="#/manage"||route==="#/admin"&&!/tab=(?:settings|usage)/.test(location.hash))return "manage";if(route==="#/settings"||route==="#/admin")return "settings";return "overview";}
 function showPage(){if(!hasSession())return;const next=routePage();if(next!==page){closeConfig(true);closeGroups(true);closeDelete(true);$("device-join").close();}page=next;for(const id of ["group","live-dot","connection"])$(id).hidden=page!=="overview";for(const name of ["overview","manage","settings","detail"])$(name+"-page").hidden=page!==name;for(const button of document.querySelectorAll("[data-page]")){if(button.dataset.page===(page==="detail"?"overview":page))button.setAttribute("aria-current","page");else button.removeAttribute("aria-current");}if(state)renderNodes();if(livePage())connect();else stopLive();if(page==="detail")renderDetail();load();loadQuota();}
@@ -340,7 +340,7 @@ function hasSession() {
   if(session.expires_at<=Date.now()){lockPanel("access_expired");return false;}
   return true;
 }
-function loginLink() { return "/auth/login"; }
+function loginLink() { return "/panel/auth/login"; }
 function lockPanel(code="access_required") {
   authLocked=true;session=null;clearTimeout(sessionTimer);stopLive();panelRefresh.invalidate();
   for(const dialog of document.querySelectorAll("dialog[open]"))dialog.close();
@@ -361,7 +361,7 @@ function armSessionExpiry() {
 }
 async function startSession() {
   try {
-    const identity=await api("/api/session");
+    const identity=await api("/panel/api/session");
     if(identity.authenticated!==true||!Number.isFinite(identity.expires_at)||identity.expires_at<=Date.now())throw new Error("invalid session");
     session=identity;authLocked=false;$("login-panel").hidden=true;$("panel-content").hidden=false;
     $("session-user").textContent=identity.mode==="local"?"本地开发":identity.email;$("session-user").title=$("session-user").textContent;$("session-user").hidden=false;
@@ -369,7 +369,7 @@ async function startSession() {
     // Session storage is only a landing-page preference, never authentication.
     let firstEntry=true;
     try { firstEntry=sessionStorage.getItem("spiderwatch-panel-session")!==String(identity.expires_at);sessionStorage.setItem("spiderwatch-panel-session",String(identity.expires_at)); } catch {}
-    if(firstEntry)history.replaceState(null,"","/#/");
+    if(firstEntry)history.replaceState(null,"","/panel/#/");
     armSessionExpiry();showPage();
   } catch { if($("login-title").textContent==="正在验证登录")lockPanel("connection_failed"); }
 }

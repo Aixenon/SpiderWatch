@@ -17,7 +17,7 @@ it("validates Access signatures, audience, expiration and the panel administrato
   const configured={...env,LOCAL_DEV:"false",INVITATION_SECRET:"local-development-invitations-only",ACCESS_TEAM_DOMAIN:domain,ACCESS_PANEL_AUD:"panel",ACCESS_AGENT_AUD:"agents",ADMIN_EMAILS:"owner@example.test"};
   const token=async(aud:string,email="owner@example.test",expired=false)=>new SignJWT({email})
     .setProtectedHeader({alg:"RS256",kid:"test-key"}).setIssuer(domain).setAudience(aud).setIssuedAt().setExpirationTime(expired?Math.floor(Date.now()/1000)-60:"1h").sign(pair.privateKey);
-  const request=async(aud:string,email?:string,expired=false)=>new Request("https://monitor.example.test/api/state",{headers:{"cf-access-jwt-assertion":await token(aud,email,expired)}});
+  const request=async(aud:string,email?:string,expired=false)=>new Request("https://monitor.example.test/panel/api/state",{headers:{"cf-access-jwt-assertion":await token(aud,email,expired)}});
   expect(await authorize(await request("panel"),configured,"admin")).not.toBeInstanceOf(Response);
   expect((await authorize(await request("agents"),configured,"admin") as Response).status).toBe(401);
   expect((await authorize(await request("panel","stranger@example.test"),configured,"admin") as Response).status).toBe(403);
@@ -34,7 +34,7 @@ it("validates Access signatures, audience, expiration and the panel administrato
 
 it("fails closed before reading credentials when an Access setting is absent or blank", async () => {
   const configured = { ...env, LOCAL_DEV: "false", ACCESS_TEAM_DOMAIN: "monitor-settings.cloudflareaccess.com", ACCESS_PANEL_AUD: "panel", ADMIN_EMAILS: "owner@example.test" };
-  const request = new Request("https://monitor.example.test/api/session", { headers: { "cf-access-jwt-assertion": "unverified" } });
+  const request = new Request("https://monitor.example.test/panel/api/session", { headers: { "cf-access-jwt-assertion": "unverified" } });
   const fetch = vi.spyOn(globalThis, "fetch");
   const keys = ["ACCESS_TEAM_DOMAIN", "ACCESS_PANEL_AUD", "ADMIN_EMAILS"] as const;
   const absent = { ...configured };
@@ -66,7 +66,7 @@ it("normalizes copied Access team domains while preserving issuer, algorithm and
   const configured = { ...env, LOCAL_DEV: "false", ACCESS_TEAM_DOMAIN: domain, ACCESS_PANEL_AUD: "panel", ADMIN_EMAILS: " Other@Example.Test, OWNER@EXAMPLE.TEST " };
   const claims = () => new SignJWT({ email: "Owner@Example.Test" }).setIssuer(domain).setAudience("panel").setSubject("owner-id");
   const token = await claims().setProtectedHeader({ alg: "RS256", kid: "copied" }).setExpirationTime("1h").sign(pair.privateKey);
-  const request = (value: string) => new Request("https://monitor.example.test/api/session", { headers: { "cf-access-jwt-assertion": value } });
+  const request = (value: string) => new Request("https://monitor.example.test/panel/api/session", { headers: { "cf-access-jwt-assertion": value } });
   for (const team of ["copied-team.cloudflareaccess.com", " COPIED-TEAM.CLOUDFLAREACCESS.COM ", " HTTPS://COPIED-TEAM.CLOUDFLAREACCESS.COM/ "]) {
     expect(await authorize(request(token), { ...configured, ACCESS_TEAM_DOMAIN: team }, "admin")).toMatchObject({ subject: "owner-id", email: "owner@example.test" });
   }

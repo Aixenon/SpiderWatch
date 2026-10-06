@@ -27,9 +27,8 @@ Cloudflare Workers + SQLite Durable Objects 网络监控面板，配套单文件
 
 1. 在该 Worker 的 **Settings → Domains & Routes** 中添加自定义域名，例如 `monitor.example.com`。
 2. 在 Cloudflare Zero Trust 中设置团队名，记下 `https://你的团队.cloudflareaccess.com`；在 **Integrations → Identity providers** 添加 **Cloudflare**，开启 **Restrict to account members**。
-3. 在 **Access → Applications** 创建自托管应用，主机名使用面板域名，保护整个站点。登录方式只选择 **Cloudflare**，Allow 策略只允许指定的管理员邮箱，保留标准登录页。复制该应用的 **Application Audience (AUD)**。使用此处按主机名配置的应用；不要启用 Worker 级的 **Protect this Worker / Protect all Workers**，该模式不支持 WebSocket。
-4. 为同一主机名的以下路径创建更具体的 Access 应用，使用 **Bypass → Everyone**：`/v1/*`、`/bootstrap/enroll`、`/bootstrap/status`。这些路径由客户端签名或一次性邀请验证；其余页面和 `/api/*` 必须保持 Access 保护。不要把整个域名设为 Bypass。
-5. 回到 Worker 的 **Settings → Variables and Secrets**，保存以下三项运行时配置：
+3. 在 **Access → Applications** 创建一个自托管应用，主机名使用面板域名，**Path 填写 `panel`**。登录方式只选择 **Cloudflare**，Allow 策略只允许指定的管理员邮箱，保留标准登录页。复制该应用的 **Application Audience (AUD)**。这一个应用保护面板及其全部管理接口，**无需创建 Bypass 应用或策略**。不要启用 Worker 级的 **Protect this Worker / Protect all Workers**，该模式不支持 WebSocket。
+4. 回到 Worker 的 **Settings → Variables and Secrets**，保存以下三项运行时配置：
 
 | 名称 | 内容 |
 |---|---|
@@ -38,6 +37,8 @@ Cloudflare Workers + SQLite Durable Objects 网络监控面板，配套单文件
 | `ADMIN_EMAILS` | 允许登录的管理员邮箱，多个用逗号分隔，与 Access Allow 策略一致 |
 
 自定义域名和 Access 配置完成后，可在 **Domains & Routes** 关闭 `workers.dev`。后续发布会保留控制台中的域名、登录配置和此开关，无需在 GitHub 再填一份。Access 配置不完整时不会自动认领管理员。
+
+面板、管理接口和实时连接统一位于 `/panel/` 下；设备接口继续使用专用密钥和一次性邀请验证。访问网站根地址会自动进入 `/panel/`。如果已经按旧说明保护整个域名，将原面板 Access 应用的 Path 改为 `panel`，并删除旧的客户端 Bypass 应用即可；继续使用该面板应用的 AUD。
 
 ### 3. 登录并添加设备
 

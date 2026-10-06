@@ -10,7 +10,7 @@ const host = { hostname:"computer-name", os:"linux", arch:"arm", cpus:1, agent_v
 const stub = () => env.MONITOR.getByName(env.MONITOR_GROUP);
 const headers = { "X-Monitor-Node-ID":id, Authorization:"Bearer " + key };
 async function request(path: string, method = "POST", body?: unknown, extra = {}) {
-  const response = await worker.fetch(new Request(origin + path, {method, headers:{ ...(path.endsWith("/enroll") ? await invitationHeaders() : {}),Origin:origin, "Content-Type":"application/json", ...extra}, body:body === undefined ? undefined : JSON.stringify(body)}),env);
+  const response = await worker.fetch(new Request(origin + (path.startsWith("/api/") ? "/panel" + path : path), {method, headers:{ ...(path.endsWith("/enroll") ? await invitationHeaders() : {}),Origin:origin, "Content-Type":"application/json", ...extra}, body:body === undefined ? undefined : JSON.stringify(body)}),env);
   return new Response(await response.arrayBuffer(), {status:response.status, headers:response.headers});
 }
 afterEach(async () => { await reset(); });

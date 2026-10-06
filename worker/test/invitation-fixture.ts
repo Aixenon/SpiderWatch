@@ -4,7 +4,7 @@ import worker from "../src/index";
 // Older telemetry/UI tests keep their legacy device fixtures but must enroll
 // through the same explicit, expiring invitation requirement as real agents.
 export async function invitationHeaders(): Promise<Record<string,string>> {
-  const response = await worker.fetch(new Request("http://127.0.0.1/api/invitations", {
+  const response = await worker.fetch(new Request("http://127.0.0.1/panel/api/invitations", {
     method:"POST", headers:{Origin:"http://127.0.0.1"},
   }),env);
   if (!response.ok) throw new Error("test invitation creation failed: " + response.status);

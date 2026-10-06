@@ -11,7 +11,7 @@ const origin = "http://127.0.0.1", clients = new Set<WebSocket>();
 const stub = () => env.MONITOR.getByName(env.MONITOR_GROUP);
 const value = (snapshot: QuotaSnapshot, id: string) => snapshot.rows.find(row => row.id === id)!.value;
 async function get() {
-  const response = await worker.fetch(new Request(origin+"/api/quota"), env);
+  const response = await worker.fetch(new Request(origin+"/panel/api/quota"), env);
   expect(response.headers.get("Cache-Control")).toBe("no-store");
   return await response.json() as QuotaSnapshot;
 }
@@ -72,7 +72,7 @@ it("merges today's persisted and pending counts without flushing or including ye
 });
 
 it("preserves uncheckpointed WebSocket usage through hibernation without counting it again after a checkpoint", async () => {
-  const response=await worker.fetch(new Request(origin+"/api/live",{headers:{Upgrade:"websocket",Origin:origin}}),env);
+  const response=await worker.fetch(new Request(origin+"/panel/api/live",{headers:{Upgrade:"websocket",Origin:origin}}),env);
   expect(response.status).toBe(101);const client=response.webSocket!;clients.add(client);client.accept();
   await resetCounters();
   await runInDurableObject(stub(),(instance,ctx)=>{
@@ -87,13 +87,13 @@ it("preserves uncheckpointed WebSocket usage through hibernation without countin
   expect(folded(await get())).toBe(11);
   await evictDurableObject(stub());
   expect(folded(await get())).toBe(11);
-  const state=await worker.fetch(new Request(origin+"/api/state"),env);await state.arrayBuffer();
+  const state=await worker.fetch(new Request(origin+"/panel/api/state"),env);await state.arrayBuffer();
   expect(folded(await get())).toBe(11);
   await evictDurableObject(stub());expect(folded(await get())).toBe(11);
 });
 
 it("does not reuse an attachment from a previous persisted epoch", async () => {
-  const response=await worker.fetch(new Request(origin+"/api/live",{headers:{Upgrade:"websocket",Origin:origin}}),env);
+  const response=await worker.fetch(new Request(origin+"/panel/api/live",{headers:{Upgrade:"websocket",Origin:origin}}),env);
   const client=response.webSocket!;clients.add(client);client.accept();await resetCounters();
   await runInDurableObject(stub(),(instance,ctx)=>{
     const hour=hourOf(Date.now());ctx.storage.sql.exec("INSERT INTO usage(hour,fast_messages) VALUES (?,100)",hour);
@@ -106,7 +106,7 @@ it("does not reuse an attachment from a previous persisted epoch", async () => {
 
 it("retains admin authorization for the local usage endpoint", async () => {
   const upstream=vi.spyOn(globalThis,"fetch");
-  const response=await worker.fetch(new Request("https://monitor.example.com/api/quota"),{...env,LOCAL_DEV:"false"});
+  const response=await worker.fetch(new Request("https://monitor.example.com/panel/api/quota"),{...env,LOCAL_DEV:"false"});
   expect(response.ok).toBe(false);expect(upstream).not.toHaveBeenCalled();
 });
 
