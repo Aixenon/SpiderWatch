@@ -4,7 +4,7 @@ Cloudflare Workers + SQLite Durable Objects 网络监控面板，配套单文件
 
 ## 部署到 Cloudflare
 
-需要一个 Cloudflare 账户和包含本项目完整源码的 GitHub 仓库。通过 Cloudflare Workers Builds 连接仓库即可部署；面板使用 GitHub 登录，无需开通 Zero Trust。可以使用 `workers.dev` 地址，也可绑定自己的域名。
+需要一个 Cloudflare 账户、托管在该账户下的域名和包含本项目完整源码的 GitHub 仓库。通过 Cloudflare Workers Builds 连接仓库即可部署；面板使用 GitHub 登录，无需开通 Zero Trust。默认使用自定义域名，关闭 `workers.dev` 和预览地址。
 
 源码仓库可以私有保存；现有客户端安装与自动更新依赖可访问的公开 GitHub Releases。
 
@@ -26,11 +26,13 @@ Cloudflare Workers + SQLite Durable Objects 网络监控面板，配套单文件
 
 已经把 Root directory 填为 `worker` 的项目也可继续使用相同命令。如果日志提示找不到 `/opt/buildhome/repo/package.json`，请部署仓库最新提交；根目录现已提供安装与部署入口。
 
-首次部署会提供 `workers.dev` 地址。登录配置未完成时，页面只显示配置提示，不能取得管理权限。
+首次部署完成后，在 Worker 的 **Settings → Domains & Routes → Add → Custom Domain** 绑定面板域名，例如 `monitor.example.com`，再继续设置登录。登录配置未完成时，页面只显示配置提示，不能取得管理权限。
+
+`worker/wrangler.jsonc` 中的 `workers_dev` 和 `preview_urls` 默认均为 `false`，每次部署按源码配置应用；已有部署启用的地址也会在下次部署时关闭。如需使用 `workers.dev`，将源码中的 `workers_dev` 显式改为 `true` 后重新部署；预览地址由 `preview_urls` 独立控制。
 
 ### 2. 设置 GitHub 登录
 
-1. 确定面板地址，例如 `https://spider-watch.你的子域.workers.dev`。使用自定义域名时，先在 Worker 的 **Settings → Domains & Routes** 添加域名。
+1. 确定已绑定的面板地址，例如 `https://monitor.example.com`。
 2. 打开 GitHub **Settings → Developer settings → OAuth Apps → New OAuth App**。Application name 填 `SpiderWatch`，Homepage URL 填面板地址，Authorization callback URL 填 `https://你的面板地址/panel/auth/github/callback`。无需启用 Device Flow。创建后复制 Client ID，并生成 Client Secret；每位部署者创建自己的 OAuth 应用。
 3. 访问 `https://api.github.com/users/你的GitHub用户名`，记录返回的数字 `id`（不是 `node_id`）。在 Worker 的 **Settings → Variables and Secrets** 添加以下运行时配置并保存部署：
 
@@ -40,7 +42,9 @@ Cloudflare Workers + SQLite Durable Objects 网络监控面板，配套单文件
 | `GITHUB_CLIENT_SECRET` | OAuth 应用的 Client Secret，类型 Secret |
 | `ADMIN_GITHUB_IDS` | 允许登录的 GitHub 数字 ID，多个用逗号分隔，类型 Text |
 
-`SESSION_SECRET` 由部署脚本自动生成，无需手动填写。登录配置不完整时拒绝访问，不会让首位访问者自动成为管理员。后续发布保留控制台中的登录配置、域名以及 `workers.dev` 开关；更换面板域名时也要更新 GitHub OAuth 回调地址。
+`SESSION_SECRET` 由部署脚本自动生成，无需手动填写。登录配置不完整时拒绝访问，不会让首位访问者自动成为管理员。后续发布保留控制台中的登录配置和自定义域名；`workers.dev` 与预览地址开关以源码配置为准。更换面板域名时也要更新 GitHub OAuth 回调地址。
+
+登录失败时，页面会区分应用凭据错误、回调不匹配、授权码失效及 GitHub 连接失败。Client Secret 必须来自同一个 OAuth App，不能使用个人访问令牌代替；授权码失效时点击“重新登录”，不要刷新回调页面。运行日志仅记录验证阶段和固定错误代码，不记录凭据或 GitHub 响应正文。
 
 已有 Access 部署请先部署新版并填好 GitHub 配置，再删除本项目的 Access 应用和 Bypass 应用，关闭 Worker 级 Access 保护。旧的 `ACCESS_TEAM_DOMAIN`、`ACCESS_PANEL_AUD`、`ACCESS_AGENT_AUD`、`ADMIN_EMAILS` 可从运行时配置移除。
 

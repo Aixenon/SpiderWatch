@@ -46,6 +46,7 @@ function redirect(location: string, cookies: string[] = []): Response {
 function authError(code: string, status: number, clearSession = false): Response {
   const response = json({ code }, status);
   response.headers.set("Referrer-Policy", "no-referrer");
+  response.headers.set("X-SpiderWatch-Auth-Error", code);
   response.headers.append("Set-Cookie", setCookie(FLOW_COOKIE, "", 0));
   if (clearSession) response.headers.append("Set-Cookie", setCookie(SESSION_COOKIE, "", 0));
   return response;
@@ -85,24 +86,49 @@ export async function authorize(request: Request, env: Env, role: "agent" | "adm
   } catch { return json({ code: "invalid_session" }, 401); }
 }
 
-async function githubJSON(url: string, init: RequestInit): Promise<Record<string, unknown>> {
-  const response = await fetch(url, { ...init, redirect: "error", signal: AbortSignal.timeout(10_000) });
-  if (!response.ok || !response.body || Number(response.headers.get("Content-Length")) > 32768) {
-    await response.body?.cancel(); throw new Error("GitHub unavailable");
+class LoginFailure extends Error {
+  constructor(readonly code: string, readonly status = 502) { super(code); }
+}
+
+function tokenError(error: unknown): LoginFailure {
+  switch (error) {
+    case "incorrect_client_credentials": return new LoginFailure("github_client_credentials_invalid", 503);
+    case "redirect_uri_mismatch": return new LoginFailure("github_callback_mismatch", 503);
+    case "bad_verification_code": return new LoginFailure("oauth_code_invalid", 400);
+    case "unverified_user_email": return new LoginFailure("github_email_unverified", 403);
+    case "application_suspended": return new LoginFailure("github_app_unavailable", 503);
+    default: return new LoginFailure("github_token_exchange_failed");
   }
-  const reader = response.body.getReader(), chunks: Uint8Array[] = []; let total = 0;
+}
+
+async function githubJSON(url: string, init: RequestInit, step: "token" | "profile"): Promise<Record<string, unknown>> {
+  let response: Response;
+  try { response = await fetch(url, { ...init, redirect: "error", signal: AbortSignal.timeout(10_000) }); }
+  catch { throw new LoginFailure("github_connection_failed"); }
+  if (response.status === 429 || response.status === 403 && (response.headers.get("X-RateLimit-Remaining") === "0" || response.headers.has("Retry-After"))) {
+    await response.body?.cancel().catch(() => {}); throw new LoginFailure("github_rate_limited", 429);
+  }
+  if (!response.body || Number(response.headers.get("Content-Length")) > 32768) {
+    await response.body?.cancel().catch(() => {}); throw new LoginFailure("github_response_invalid");
+  }
+  const reader = response.body.getReader(), chunks: Uint8Array[] = []; let total = 0, finished = false;
   try {
     for (;;) {
-      const { value, done } = await reader.read(); if (done) break;
+      const { value, done } = await reader.read(); if (done) { finished = true; break; }
       total += value.byteLength;
-      if (total > 32768) throw new Error("GitHub response too large");
+      if (total > 32768) throw new LoginFailure("github_response_invalid");
       chunks.push(value);
     }
-  } finally { await reader.cancel(); reader.releaseLock(); }
+  } catch (error) { throw error instanceof LoginFailure ? error : new LoginFailure("github_connection_failed"); }
+  finally { if (!finished) await reader.cancel().catch(() => {}); reader.releaseLock(); }
   const buffer = new Uint8Array(total); let offset = 0;
   for (const chunk of chunks) { buffer.set(chunk, offset); offset += chunk.byteLength; }
-  const data: unknown = JSON.parse(new TextDecoder().decode(buffer));
-  if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("Invalid GitHub response");
+  let data: unknown;
+  try { data = JSON.parse(new TextDecoder().decode(buffer)); }
+  catch { throw new LoginFailure(response.ok ? "github_response_invalid" : "github_connection_failed"); }
+  if (!data || typeof data !== "object" || Array.isArray(data)) throw new LoginFailure("github_response_invalid");
+  if (step === "token" && "error" in data) throw tokenError(data.error);
+  if (!response.ok) throw new LoginFailure(step === "profile" && response.status === 401 ? "github_token_rejected" : step === "profile" ? "github_profile_failed" : "github_token_exchange_failed");
   return data as Record<string, unknown>;
 }
 
@@ -144,14 +170,22 @@ export async function handleLogin(request: Request, env: Env): Promise<Response 
       || !timingSafeEqual(encoder.encode(state), encoder.encode(flow.state))) throw new Error("State mismatch");
   } catch { return authError("oauth_state_invalid", 400); }
   if (!env.LOGIN_LIMITER || !(await env.LOGIN_LIMITER.limit({ key: "callback:" + (request.headers.get("CF-Connecting-IP") || "unknown") })).success) return authError("login_rate_limited", 429);
+  let stage: "token" | "profile" | "session" = "token";
   try {
     const result = await githubJSON("https://github.com/login/oauth/access_token", { method: "POST", headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "SpiderWatch" },
-      body: new URLSearchParams({ client_id: config.clientId, client_secret: config.clientSecret, code, redirect_uri: callback, code_verifier: String(flow.verifier) }).toString() });
-    if (result.error || typeof result.access_token !== "string" || !/^[A-Za-z0-9_]{1,512}$/.test(result.access_token) || result.token_type !== "bearer") throw new Error("OAuth exchange failed");
-    const user = await githubJSON("https://api.github.com/user", { headers: { Authorization: "Bearer " + result.access_token, Accept: "application/vnd.github+json", "User-Agent": "SpiderWatch", "X-GitHub-Api-Version": "2022-11-28" } });
-    if (!Number.isSafeInteger(user.id) || !idPattern.test(String(user.id)) || typeof user.login !== "string" || !/^[A-Za-z0-9-]{1,39}$/.test(user.login) || user.type !== "User") throw new Error("Invalid GitHub identity");
+      body: new URLSearchParams({ client_id: config.clientId, client_secret: config.clientSecret, code, redirect_uri: callback, code_verifier: String(flow.verifier) }).toString() }, "token");
+    if (typeof result.access_token !== "string" || !/^[A-Za-z0-9_]{1,512}$/.test(result.access_token) || typeof result.token_type !== "string" || result.token_type.toLowerCase() !== "bearer") throw new LoginFailure("github_response_invalid");
+    stage = "profile";
+    const user = await githubJSON("https://api.github.com/user", { headers: { Authorization: "Bearer " + result.access_token, Accept: "application/vnd.github+json", "User-Agent": "SpiderWatch", "X-GitHub-Api-Version": "2022-11-28" } }, "profile");
+    if (!Number.isSafeInteger(user.id) || !idPattern.test(String(user.id)) || typeof user.login !== "string" || !/^[A-Za-z0-9-]{1,39}$/.test(user.login) || user.type !== "User") throw new LoginFailure("github_profile_invalid");
     if (!config.admins.has(String(user.id))) return authError("admin_required", 403, true);
+    stage = "session";
     const session = await sign(config, url.origin, "spiderwatch-session", String(user.id), { login: user.login }, SESSION_SECONDS);
     return redirect("/panel/#/", [setCookie(FLOW_COOKIE, "", 0), setCookie(SESSION_COOKIE, session, SESSION_SECONDS)]);
-  } catch { return authError("github_unavailable", 502); }
+  } catch (error) {
+    const failure = error instanceof LoginFailure ? error : new LoginFailure("github_session_failed", 500);
+    // Never log provider response bodies, URLs, authorization codes or credentials.
+    console.warn(JSON.stringify({ event: "github_login_failed", stage, code: failure.code, status: failure.status }));
+    return authError(failure.code, failure.status);
+  }
 }

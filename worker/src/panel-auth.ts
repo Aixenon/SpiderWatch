@@ -1,9 +1,30 @@
+// These messages are fixed strings; never render text returned by GitHub.
+const loginErrors: Record<string, [string, string]> = {
+  github_client_credentials_invalid: ["GitHub 应用配置不正确", "GitHub 拒绝了应用凭据。请在 Worker 的变量和机密中检查 GITHUB_CLIENT_ID 与 GITHUB_CLIENT_SECRET 是否来自同一个 OAuth App，并使用该应用的有效 Client Secret。"],
+  github_callback_mismatch: ["GitHub 回调地址不匹配", "请将 OAuth App 的 Authorization callback URL 设置为当前面板域名加 /panel/auth/github/callback，然后重新登录。"],
+  oauth_code_invalid: ["登录授权已失效", "授权码已过期、已使用或无法验证。请点击重新登录，不要刷新此回调页面。"],
+  github_email_unverified: ["GitHub 邮箱尚未验证", "请先在 GitHub 验证账户邮箱，然后重新登录。"],
+  github_app_unavailable: ["GitHub 应用不可用", "此 OAuth App 已被停用，请在 GitHub 检查应用状态。"],
+  github_connection_failed: ["连接 GitHub 失败", "服务器暂时无法连接 GitHub 或读取其响应，请稍后重新登录。"],
+  github_rate_limited: ["GitHub 请求过于频繁", "GitHub 暂时限制了验证请求，请稍后重新登录。"],
+  github_token_exchange_failed: ["GitHub 授权验证失败", "GitHub 未能完成授权码验证。请检查 OAuth App 的配置，然后重新登录。"],
+  github_token_rejected: ["GitHub 授权已失效", "GitHub 拒绝了本次授权，请重新登录。"],
+  github_profile_failed: ["无法读取 GitHub 账户", "授权后读取账户信息失败，请稍后重新登录。"],
+  github_profile_invalid: ["GitHub 账户信息无效", "GitHub 未返回有效的个人账户信息，请使用个人账户重新登录。"],
+  github_response_invalid: ["GitHub 响应无效", "GitHub 返回了无法识别的验证响应，请稍后重新登录。"],
+  github_session_failed: ["无法建立登录会话", "请检查 Worker 的 SESSION_SECRET 配置，并查看运行日志中的错误代码。"],
+};
+
 // Keep the login page independent of protected assets and application data.
 export function panelAuthFailure(request: Request, response: Response): Response {
   if (!["GET", "HEAD"].includes(request.method) ||
       !(request.headers.get("Accept")?.includes("text/html") || request.headers.get("Sec-Fetch-Dest") === "document")) return response;
   const status = response.status;
-  const [title, description, link] = status === 503
+  const code = response.headers.get("X-SpiderWatch-Auth-Error") || "";
+  const detail = Object.hasOwn(loginErrors, code) ? loginErrors[code] : undefined;
+  const [title, description, link] = detail
+    ? [...detail, '<a href="/panel/auth/login">重新登录</a>']
+    : status === 503
     ? ["登录尚未配置", "在 Cloudflare 控制台打开此 Worker 的设置 → 变量和机密，添加：<br><code>GITHUB_CLIENT_ID</code>：OAuth 应用 ID<br><code>GITHUB_CLIENT_SECRET</code>：OAuth 应用密钥<br><code>ADMIN_GITHUB_IDS</code>：管理员数字 ID，多个用逗号分隔。<br>部署脚本自动生成 <code>SESSION_SECRET</code>。保存配置后刷新页面。", ""]
     : status === 403
       ? ["没有访问权限", "当前 GitHub 账户不在管理员名单中。", '<a href="/panel/auth/login">切换 GitHub 账户</a>']

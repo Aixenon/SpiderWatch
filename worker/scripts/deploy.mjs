@@ -59,7 +59,7 @@ export async function readDeployment(account, name, credential, request = fetch)
     return body.result;
   }
   const secrets = await get('secrets', true);
-  if (secrets === null) return { exists: false, hasInvitation: false, hasSession: false, workersDev: true, previews: false };
+  if (secrets === null) return { exists: false, hasInvitation: false, hasSession: false, workersDev: false, previews: false };
   if (!Array.isArray(secrets) || secrets.some(secret => typeof secret?.name !== 'string')) {
     throw new Error('Invalid Worker secrets response; deployment stopped.');
   }
@@ -90,7 +90,7 @@ export function sessionFor(state, supplied) {
   return value;
 }
 
-export function deploymentConfig(source, { name, repository, state, account }) {
+export function deploymentConfig(source, { name, repository, account }) {
   const config = structuredClone(source);
   delete config.env;
   // Omitted routes preserve domains managed in the Cloudflare dashboard.
@@ -101,7 +101,8 @@ export function deploymentConfig(source, { name, repository, state, account }) {
     delete config.vars[key];
   }
   Object.assign(config, {
-    name, keep_vars: true, workers_dev: state.workersDev, preview_urls: state.previews,
+    // Source configuration controls public URLs, including on existing Workers.
+    name, keep_vars: true, workers_dev: source.workers_dev ?? false, preview_urls: source.preview_urls ?? false,
     main: resolve(root, source.main),
     assets: { ...source.assets, directory: resolve(root, source.assets.directory) },
   });
@@ -135,7 +136,7 @@ export async function main(args = process.argv.slice(2), env = process.env) {
   } catch {}
   const repository = identifyRepository(env, remote);
   let account;
-  let state = { exists: false, hasInvitation: false, hasSession: false, workersDev: true, previews: false };
+  let state = { exists: false, hasInvitation: false, hasSession: false, workersDev: false, previews: false };
   if (!dry) {
     const configured = env.CLOUDFLARE_ACCOUNT_ID || source.account_id;
     account = selectAccount(configured, configured ? undefined : wranglerJSON(['whoami']));
@@ -144,7 +145,7 @@ export async function main(args = process.argv.slice(2), env = process.env) {
       : wranglerJSON(['auth', 'token']);
     state = await readDeployment(account, name, credential);
   }
-  const config = deploymentConfig(source, { name, repository, state, account });
+  const config = deploymentConfig(source, { name, repository, account });
   const invitation = invitationFor(state, env.INVITATION_SECRET);
   const session = sessionFor(state, env.SESSION_SECRET);
   const tempRoot = resolve(root, '.tmp');

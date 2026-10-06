@@ -10,7 +10,7 @@ import { deploymentConfig, identifyRepository, invitationFor, sessionFor, main, 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const account = 'a'.repeat(32);
 const credential = { type: 'api_token', token: 'fixture-api-token' };
-const newState = { exists: false, hasInvitation: false, hasSession: false, workersDev: true, previews: false };
+const newState = { exists: false, hasInvitation: false, hasSession: false, workersDev: false, previews: false };
 const existingState = { exists: true, hasInvitation: true, hasSession: true, workersDev: false, previews: false };
 const success = result => Response.json({ success: true, result });
 
@@ -63,7 +63,7 @@ test('treats only the Worker-not-found response as a first deployment', async ()
   assert.deepEqual(calls, [`https://api.cloudflare.com/client/v4/accounts/${account}/workers/scripts/spider-watch/secrets`]);
 });
 
-test('reads existing secret names and preserves both domain switches without retrieving secret values', async () => {
+test('reads existing secret names and domain switches without retrieving secret values', async () => {
   for (const workersDev of [false, true]) for (const previews of [false, true]) {
     const calls = [];
     const state = await readDeployment(account, 'spider-watch', credential, async (url, options) => {
@@ -91,7 +91,7 @@ test('supports Wrangler token, OAuth and API key credential JSON without mixing 
       assert.deepEqual(options.headers, expected);
       return url.endsWith('/secrets') ? success([]) : success({ enabled: true, previews_enabled: false });
     });
-    assert.deepEqual(state, { ...newState, exists: true });
+    assert.deepEqual(state, { ...newState, exists: true, workersDev: true });
   }
   let requested = false;
   await assert.rejects(readDeployment(account, 'spider-watch', { type: 'api_token' }, async () => { requested = true; }), /authentication unavailable/);
@@ -130,7 +130,7 @@ test('keeps dashboard-managed settings out of the upload and preserves durable b
   source.account_id = 'b'.repeat(32);
   Object.assign(source.vars, { GITHUB_CLIENT_ID: 'old-app', GITHUB_CLIENT_SECRET: 'old-secret', ADMIN_GITHUB_IDS: '12345', SESSION_SECRET: 'a'.repeat(64), ACCESS_TEAM_DOMAIN: 'old.cloudflareaccess.com', ACCESS_PANEL_AUD: 'old-aud', ACCESS_AGENT_AUD: 'old-agent-aud', ADMIN_EMAILS: 'old@example.test' });
   const original = structuredClone(source);
-  const config = deploymentConfig(source, { name: 'spider-watch', repository: 'fork/SpiderWatch', state: existingState, account });
+  const config = deploymentConfig(source, { name: 'spider-watch', repository: 'fork/SpiderWatch', account });
   assert.deepEqual(source, original);
   for (const key of ['env', 'routes', 'route']) assert.equal(Object.hasOwn(config, key), false);
   for (const key of ['GITHUB_CLIENT_ID', 'GITHUB_CLIENT_SECRET', 'ADMIN_GITHUB_IDS', 'SESSION_SECRET', 'ACCESS_TEAM_DOMAIN', 'ACCESS_PANEL_AUD', 'ACCESS_AGENT_AUD', 'ADMIN_EMAILS']) assert.equal(Object.hasOwn(config.vars, key), false);
@@ -149,7 +149,20 @@ test('keeps dashboard-managed settings out of the upload and preserves durable b
   assert.ok(isAbsolute(config.main) && isAbsolute(config.assets.directory));
 });
 
-function fakeDeployment({ secrets = [{ name: 'INVITATION_SECRET' }, { name: 'SESSION_SECRET' }], status = 0, error, authError = false, apiStatus = 200 } = {}) {
+test('uses explicit source URL switches and defaults omitted switches to disabled', () => {
+  for (const workersDev of [undefined, false, true]) for (const previews of [undefined, false, true]) {
+    const source = JSON.parse(readFileSync(resolve(root, 'wrangler.jsonc'), 'utf8'));
+    if (workersDev === undefined) delete source.workers_dev;
+    else source.workers_dev = workersDev;
+    if (previews === undefined) delete source.preview_urls;
+    else source.preview_urls = previews;
+    const config = deploymentConfig(source, { name: 'spider-watch', repository: 'fork/SpiderWatch', account });
+    assert.equal(config.workers_dev, workersDev ?? false);
+    assert.equal(config.preview_urls, previews ?? false);
+  }
+});
+
+function fakeDeployment({ secrets = [{ name: 'INVITATION_SECRET' }, { name: 'SESSION_SECRET' }], exists = true, workersDev = false, previews = false, status = 0, error, authError = false, apiStatus = 200 } = {}) {
   const calls = [], uploads = [], logs = [];
   mock.method(console, 'log', value => logs.push(String(value)));
   mock.method(childProcess, 'execFileSync', (command, args) => {
@@ -163,7 +176,8 @@ function fakeDeployment({ secrets = [{ name: 'INVITATION_SECRET' }, { name: 'SES
   const request = mock.method(globalThis, 'fetch', async url => {
     assert.ok(url.startsWith(`https://api.cloudflare.com/client/v4/accounts/${account}/workers/scripts/spider-watch/`));
     if (apiStatus !== 200) return Response.json({ success: false, errors: [{ code: 10000 }] }, { status: apiStatus });
-    return url.endsWith('/secrets') ? success(secrets) : success({ enabled: false, previews_enabled: false });
+    if (!exists) return Response.json({ success: false, errors: [{ code: 10007 }] }, { status: 404 });
+    return url.endsWith('/secrets') ? success(secrets) : success({ enabled: workersDev, previews_enabled: previews });
   });
   const deploy = mock.method(childProcess, 'spawnSync', (_command, args) => {
     assert.equal(args[1], 'deploy');
@@ -190,6 +204,26 @@ test('redeployment keeps existing credentials and removes only its temporary dep
   assert.equal(existsSync(upload.directory), false);
   assert.equal(fixture.request.mock.callCount(), 2);
   assert.ok(fixture.logs.every(line => !line.includes(credential.token)));
+});
+
+test('first deployment disables workers.dev and previews by default', async () => {
+  const fixture = fakeDeployment({ exists: false });
+  await main([], { GITHUB_REPOSITORY: 'fixture/SpiderWatch' });
+  const upload = fixture.uploads[0];
+  assert.equal(upload.config.workers_dev, false);
+  assert.equal(upload.config.preview_urls, false);
+  assert.deepEqual(Object.keys(upload.secrets), ['INVITATION_SECRET', 'SESSION_SECRET']);
+  assert.equal(fixture.request.mock.callCount(), 1);
+});
+
+test('redeployment disables remotely enabled URLs according to the source defaults', async () => {
+  const fixture = fakeDeployment({ workersDev: true, previews: true });
+  await main([], { GITHUB_REPOSITORY: 'fixture/SpiderWatch' });
+  const upload = fixture.uploads[0];
+  assert.equal(upload.config.workers_dev, false);
+  assert.equal(upload.config.preview_urls, false);
+  assert.equal(upload.secrets, undefined);
+  assert.equal(upload.config.keep_vars, true);
 });
 
 test('uploads independent invitation and session secrets only when absent', async () => {
@@ -251,6 +285,8 @@ test('dry run does not read account credentials or make Cloudflare requests', as
   assert.equal(fixture.request.mock.callCount(), 0);
   assert.ok(fixture.uploads[0].args.includes('--dry-run'));
   assert.equal(fixture.uploads[0].config.account_id, undefined);
+  assert.equal(fixture.uploads[0].config.workers_dev, false);
+  assert.equal(fixture.uploads[0].config.preview_urls, false);
   assert.equal(existsSync(fixture.uploads[0].directory), false);
 });
 
