@@ -81,7 +81,7 @@ function clearFilters() { Object.assign(filters, { query: "", group: "all", stat
         <thead><tr><th>设备</th><th>分组</th><th>状态</th><th>设备 ID</th><th class="actions-col">操作</th></tr></thead>
         <tbody>
           <tr v-for="node in rows" :key="node.node_id">
-            <td><div class="device-cell"><span class="device-cell-icon" aria-hidden="true"><DeviceIcon :name="node.icon" /></span><div class="device-cell-copy"><RouterLink v-if="node.state === 'approved'" :to="`/server/${node.node_id}`" class="device-name">{{ node.name }}</RouterLink><span v-else class="device-name">{{ node.name }}</span><small>{{ node.host.os }} · {{ node.host.arch }} · {{ node.host.cpus }} 核</small></div></div></td>
+            <td><div class="device-cell"><span class="device-cell-icon" aria-hidden="true"><DeviceIcon :name="node.icon" /></span><div class="device-cell-copy"><RouterLink v-if="node.state === 'approved'" :to="`/server/${node.node_id}`" class="device-name">{{ node.name }}</RouterLink><span v-else class="device-name">{{ node.name }}</span><small>{{ node.host.os }} · {{ node.host.arch }}</small></div></div></td>
             <td><span class="group-tag">{{ groupLabel(node.group_id) }}</span></td>
             <td><span class="status" :class="statusClass(node)"><i></i>{{ statusLabel(node) }}</span></td>
             <td><code :title="node.node_id">{{ node.node_id.slice(-12) }}</code></td><td class="actions-cell"><div class="row-actions"><button v-if="node.state === 'approved'" class="secondary small" @click="askConfig(node)">配置</button><button class="danger small" @click="askDelete(node)">删除</button></div></td>
