@@ -89,15 +89,15 @@ Windows 要求 Windows 10 / Server 2016 或更新版本；macOS 要求 macOS 13 
 
 ### 安装
 
-进入客户端发布仓库的 **Releases**，复制该版本的安装命令。命令和附件脚本已包含仓库名及版本号，安装时无需再填写仓库参数。
+在面板 **管理 → 添加设备** 中同时提供 Windows 安装包下载和 Linux/macOS 安装命令。地址使用部署时识别的客户端发布仓库，指向最新稳定 Release；仓库需要公开可访问，并已发布安装附件。
 
 - **Windows**：下载对应架构的 `spider-watch-windows-架构-setup.exe`，运行安装向导。默认安装到 `C:\Program Files\SpiderWatch`，注册开机服务和更新任务，添加命令到 PATH。安装后新开管理员终端。也可使用 Release 提供的 `curl.exe` + PowerShell 命令。
-- **Linux / macOS**：使用 Release 提供的 `curl` 下载 `install.sh`，再执行 `sudo sh install.sh`。同一个脚本识别系统和架构，并适配 systemd、OpenRC、procd 或 launchd。程序位于 `/opt/spider-watch/spider-watch`，命令链接位于 `/usr/local/bin/spider-watch`。需要 curl、CA 证书和 SHA-256 校验工具。
+- **Linux / macOS**：复制弹窗中的 `curl` 命令，下载脚本后自动安装并使用本次邀请加入。非 root 用户会通过 sudo 安装。同一个脚本识别系统和架构，并适配 systemd、OpenRC、procd 或 launchd。程序位于 `/opt/spider-watch/spider-watch`，命令链接位于 `/usr/local/bin/spider-watch`。需要 curl、CA 证书和 SHA-256 校验工具。
 - **手动运行**：直接下载对应的单个二进制。Unix 安装脚本可加 `--no-service --prefix "$HOME/.local/bin"`；也可用 `--arch` 指定清单中的架构。没有支持的服务管理器时，脚本会说明原因，不假装完成开机启动。
 
 ### 加入网络与更新
 
-安装完成后，在面板 **管理 → 添加设备** 中复制注册指令。Linux/macOS 在指令前加 `sudo`；Windows 在新的管理员终端粘贴执行：
+Windows 安装完成或客户端已安装时，在面板 **管理 → 添加设备 → 安装后加入** 中复制注册指令。Linux/macOS 在指令前加 `sudo`；Windows 在新的管理员终端粘贴执行。使用弹窗自动安装命令的 Linux/macOS 设备无需再执行一次：
 
 ```sh
 spider-watch configure --server "面板提供的完整邀请地址" --join 网络代码

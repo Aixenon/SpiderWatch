@@ -2,7 +2,7 @@ import { reactive } from "vue";
 import { request } from "./api-client";
 import { hasSession, onSessionInvalidated, sessionGeneration } from "./session";
 
-export type Invitation = { id: string; network: string; expires_at: number; server: string; command: string };
+export type Invitation = { id: string; network: string; expires_at: number; server: string; repository?: string; command: string };
 export type InvitationStatus = { state: "pending" | "closed" | "registered"; node_id?: string; expires_at?: number };
 export const registration = reactive<{ invitation?: Invitation; completed?: { id: string; node_id: string; network: string } }>({});
 let creating: Promise<Invitation> | undefined;

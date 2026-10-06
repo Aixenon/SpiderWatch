@@ -632,7 +632,7 @@ export class MonitorGroup extends DurableObject<Env> {
       this.refreshInvitationDeadline(); await this.ensureAlarm();
       const fragment = new URLSearchParams({invite:token});
       const server = `${url.origin}/#${fragment}`;
-      return json({id,expires_at:expires,server,network:this.network.code});
+      return json({id,expires_at:expires,server,network:this.network.code,repository:updateRepository(this.env)});
     }
     const invitationMatch = /^\/api\/invitations\/([a-f0-9]{32})$/.exec(url.pathname);
     if (invitationMatch && request.method === "GET") {

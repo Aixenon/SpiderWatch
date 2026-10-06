@@ -2,11 +2,30 @@ param(
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$')][string]$Repository = '__SPIDER_REPOSITORY__',
     [string]$Version = '__SPIDER_VERSION__',
     [ValidateSet('','amd64','arm64','386')][string]$Architecture = '',
-    [switch]$Silent
+    [switch]$Silent,
+    [string]$Server = '',
+    [string]$Join = '',
+    [switch]$AllowLocalHttp
 )
 $ErrorActionPreference = 'Stop'
 if ($Repository -like '__*') { throw 'Use the installer script attached to a GitHub Release, or specify -Repository OWNER/REPO -Version vX.Y.Z.' }
 if ($Version -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') { throw 'A stable vX.Y.Z release version is required.' }
+if ($Server -or $Join) {
+    if (!$Server -or !$Join) { throw '-Server and -Join must be used together.' }
+    if ($Join -notmatch '^(?:[A-Za-z0-9]{16}|[0-9]{12})$') { throw 'Invalid network code.' }
+    $taskServerUri = $null
+    if (![Uri]::TryCreate($Server, [UriKind]::Absolute, [ref]$taskServerUri) -or
+        ($taskServerUri.Scheme -ne 'https' -and !($AllowLocalHttp -and $taskServerUri.Scheme -eq 'http' -and $taskServerUri.IsLoopback))) {
+        throw 'The server must use HTTPS (local HTTP requires -AllowLocalHttp).'
+    }
+    $taskIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    try {
+        $taskPrincipal = [Security.Principal.WindowsPrincipal]::new($taskIdentity)
+        if (!$taskPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+            throw 'Run this installation command in an Administrator PowerShell terminal.'
+        }
+    } finally { $taskIdentity.Dispose() }
+}
 if (!$Architecture) {
     $taskMachine = $env:PROCESSOR_ARCHITEW6432
     if (!$taskMachine) { $taskMachine = $env:PROCESSOR_ARCHITECTURE }
@@ -29,7 +48,20 @@ try {
     $taskArguments = if ($Silent) { '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-' } else { '/NORESTART' }
     $taskProcess = Start-Process -FilePath $taskSetup -ArgumentList $taskArguments -Verb RunAs -WindowStyle Hidden -Wait -PassThru
     if ($taskProcess.ExitCode -ne 0) { throw ('Installer failed: ' + $taskProcess.ExitCode) }
-    Write-Host 'Installed. Open a new Administrator terminal and paste the registration command from the panel.'
+    if ($Server) {
+        # Use the native Program Files path even from 32-bit PowerShell, without
+        # relying on the PATH refresh that requires opening another terminal.
+        $taskProgramFiles = $env:ProgramW6432
+        if (!$taskProgramFiles) { $taskProgramFiles = $env:ProgramFiles }
+        $taskClient = Join-Path $taskProgramFiles 'SpiderWatch\spider-watch.exe'
+        $taskConfigureArguments = @('configure', '--server', $Server, '--join', $Join)
+        if ($AllowLocalHttp) { $taskConfigureArguments += '--allow-local-http' }
+        & $taskClient @taskConfigureArguments
+        if ($LASTEXITCODE -ne 0) { throw 'Installation succeeded, but registration failed. Request a new invitation and retry the panel registration command.' }
+        Write-Host 'Installed and registered. SpiderWatch is running as a system service.'
+    } else {
+        Write-Host 'Installed. Open a new Administrator terminal and paste the registration command from the panel.'
+    }
 } finally {
     # Delete only the known files in the GUID directory created by this invocation.
     foreach ($taskFile in @($taskSetup,$taskChecksums)) { if (Test-Path -LiteralPath $taskFile) { Remove-Item -LiteralPath $taskFile -Force } }

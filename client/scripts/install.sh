@@ -7,16 +7,31 @@ arch=
 prefix=/usr/local/bin
 service=yes
 detect_only=no
+server=
+join=
+allow_local_http=no
 die() { printf '%s\n' "$*" >&2; exit 1; }
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --repo|--version|--arch|--prefix) [ "$#" -ge 2 ] || die "Missing value for $1"; key=$1; value=$2; shift 2
-      case "$key" in --repo) repo=$value;; --version) version=$value;; --arch) arch=$value;; --prefix) prefix=$value;; esac;;
+    --repo|--version|--arch|--prefix|--server|--join) [ "$#" -ge 2 ] && [ -n "$2" ] || die "Missing value for $1"; key=$1; value=$2; shift 2
+      case "$key" in --repo) repo=$value;; --version) version=$value;; --arch) arch=$value;; --prefix) prefix=$value;; --server) server=$value;; --join) join=$value;; esac;;
     --no-service) service=no; shift;;
     --detect) detect_only=yes; shift;;
-    *) die "Usage: install.sh --repo OWNER/REPO [--version vX.Y.Z] [--arch ARCH] [--no-service --prefix DIR]";;
+    --allow-local-http) allow_local_http=yes; shift;;
+    *) die "Usage: install.sh --repo OWNER/REPO [--version vX.Y.Z] [--arch ARCH] [--server URL --join NETWORK_CODE] [--no-service --prefix DIR]";;
   esac
 done
+if [ -n "$server" ] || [ -n "$join" ]; then
+  [ -n "$server" ] && [ -n "$join" ] || die '--server and --join must be used together.'
+  printf '%s' "$join" | grep -Eq '^([A-Za-z0-9]{16}|[0-9]{12})$' || die 'Invalid network code.'
+  case "$server" in https://*) ;; http://*) [ "$allow_local_http" = yes ] || die 'The server must use HTTPS.';; *) die 'The server must use HTTPS.';; esac
+fi
+configure() {
+  [ -n "$server" ] || return 0
+  set -- configure --server "$server" --join "$join"
+  [ "$allow_local_http" = no ] || set -- "$@" --allow-local-http
+  "$prefix/spider-watch" "$@"
+}
 system=$(uname -s)
 case "$system" in Linux) goos=linux;; Darwin) goos=darwin;; *) die "Unsupported OS: $system. Windows: use the setup.exe installer.";; esac
 if [ -z "$arch" ]; then
@@ -104,7 +119,7 @@ if [ "$service" = yes ]; then
   esac
 fi
 mv -f "$stage/download" "$prefix/spider-watch"
-if [ "$service" = no ]; then printf 'Installed %s/spider-watch\n' "$prefix"; exit 0; fi
+if [ "$service" = no ]; then configure; printf 'Installed %s/spider-watch\n' "$prefix"; exit 0; fi
 mkdir -p /usr/local/bin
 [ ! -d /usr/local/bin/spider-watch ] || die 'CLI link is a directory.'
 ln -sfn /opt/spider-watch/spider-watch /usr/local/bin/spider-watch
@@ -224,4 +239,9 @@ if [ "$manager" = openrc ] || [ "$manager" = procd ]; then
     { crontab -l 2>/dev/null | grep -v '# spider-watch-update$' || true; printf '17 */6 * * * /opt/spider-watch/spider-watch update --automatic --config /var/lib/spider-watch/state/config.json >/dev/null 2>&1 # spider-watch-update\n'; } | crontab -
   else printf 'No cron available: use sudo spider-watch --update for updates.\n'; fi
 fi
-printf 'Installed. Copy the registration command from the panel, then run it with sudo.\n'
+if [ -n "$server" ]; then
+  configure
+  printf 'Installed and registered. SpiderWatch is running as a system service.\n'
+else
+  printf 'Installed. Copy the registration command from the panel, then run it with sudo.\n'
+fi
