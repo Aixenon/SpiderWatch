@@ -78,6 +78,7 @@ jobs:
     needs: [matrix, build]
     runs-on: windows-latest
     strategy:
+      fail-fast: false
       matrix:
         arch: [amd64, arm64, '386']
     steps:
@@ -97,9 +98,9 @@ jobs:
           & $compiler "/DVersion=$env:VERSION" "/DArch=$env:ARCH" "/DBuildDir=$((Resolve-Path client/dist).Path)" client/scripts/windows/setup.iss
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Verify install, service and uninstall on disposable runner
-        if: matrix.arch == 'amd64'
+        if: matrix.arch != 'arm64'
         shell: pwsh
-        run: ./client/scripts/windows/test-installer.ps1 -Installer client/dist/spider-watch-windows-amd64-setup.exe
+        run: ./client/scripts/windows/test-installer.ps1 -Installer client/dist/spider-watch-windows-${{ matrix.arch }}-setup.exe
       - uses: actions/upload-artifact@v4
         with:
           name: installer-${{ matrix.arch }}

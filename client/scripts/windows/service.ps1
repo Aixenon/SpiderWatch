@@ -1,6 +1,20 @@
 param([ValidateSet('Install','Remove')][string]$Action = 'Install')
 $ErrorActionPreference = 'Stop'
 
+function Initialize-MaintenanceEnvironment {
+    # Inno is an intermediate process: Windows PowerShell can inherit PS7's
+    # module paths instead of rebuilding its own. Load only the native modules.
+    if ($PSVersionTable.PSEdition -ne 'Desktop') { throw 'Windows PowerShell is required for service maintenance' }
+    $taskModules = [IO.Path]::Combine($PSHOME, 'Modules')
+    [Environment]::SetEnvironmentVariable('PSModulePath', $taskModules, 'Process')
+    [Environment]::SetEnvironmentVariable('PSModuleAnalysisCachePath', $null, 'Process')
+    foreach ($taskModule in @('Microsoft.PowerShell.Management','Microsoft.PowerShell.Security','Microsoft.PowerShell.Utility','CimCmdlets','ScheduledTasks')) {
+        $taskManifest = [IO.Path]::Combine($taskModules, $taskModule, ($taskModule + '.psd1'))
+        if (![IO.File]::Exists($taskManifest)) { throw ('Required Windows module is missing: ' + $taskModule) }
+        Import-Module -Name $taskManifest -Scope Global -Force -ErrorAction Stop
+    }
+}
+
 function ConvertTo-NativeArgument([AllowEmptyString()][string]$Value) {
     # Windows PowerShell 5 drops embedded quotes in native argument arrays.
     # Escape the command line explicitly, including trailing backslashes.
@@ -31,6 +45,7 @@ function Invoke-MaintenanceProcess([string]$FilePath, [string[]]$Arguments) {
     } finally { $taskProcess.Dispose() }
 }
 
+Initialize-MaintenanceEnvironment
 $taskSC = Join-Path $env:SystemRoot 'System32\sc.exe'
 $taskProgramDir = Split-Path -Parent $PSScriptRoot
 $taskBinary = Join-Path $taskProgramDir 'spider-watch.exe'

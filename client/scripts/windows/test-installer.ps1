@@ -3,6 +3,7 @@ $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') {
     throw 'This installation test runs only on disposable GitHub-hosted Windows runners.'
 }
+& (Join-Path $PSScriptRoot 'test-maintenance-environment.ps1')
 & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'test-service-arguments.ps1')
 if ($LASTEXITCODE) { throw 'Windows PowerShell maintenance argument test failed.' }
 $taskInstallLog = Join-Path $env:RUNNER_TEMP 'spider-watch-install.log'
