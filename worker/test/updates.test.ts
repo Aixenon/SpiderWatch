@@ -176,7 +176,7 @@ it("isolates both network settings and cached source repositories", async () => 
 
 it("guards Access, Origin, internal paths, old static downloads and unsafe configuration", async () => {
   const remote = github(), monitor = vi.spyOn(env.MONITOR, "getByName").mockImplementation(() => { throw new Error("should not reach DO"); });
-  const production = { ...configured(), LOCAL_DEV: "false", ACCESS_TEAM_DOMAIN: "https://updates-test.cloudflareaccess.com", ACCESS_AGENT_AUD: "agent", ACCESS_PANEL_AUD: "panel" };
+  const production = { ...configured(), LOCAL_DEV: "false", ACCESS_TEAM_DOMAIN: "https://updates-test.cloudflareaccess.com", ACCESS_AGENT_AUD: "agent", ACCESS_PANEL_AUD: "panel", ADMIN_EMAILS: "owner@example.test" };
   for (const path of ["/api/updates/config", "/v1/update/check", "/v1/updates/agent/stable/manifest.json"]) expect((await request("https://monitor.example.test" + path, "GET", undefined, production)).status).toBe(401);
   expect((await worker.fetch(new Request(origin + "/api/updates/config", { method: "PUT", headers: { Origin: "https://attacker.invalid" }, body: "{}" }), configured())).status).toBe(403);
   for (const path of ["/internal/update-config", "/internal/update-state", "/agent-releases", "/agent-releases/index.json"]) expect((await request(path)).status).toBe(404);

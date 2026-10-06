@@ -4,54 +4,57 @@ Cloudflare Workers + SQLite Durable Objects 网络监控面板，配套单文件
 
 ## 部署到 Cloudflare
 
-需要一个 Cloudflare 账户、托管在该账户中的域名，以及自己的 GitHub 仓库。将项目放入仓库后启用 GitHub Actions。
+需要一个 Cloudflare 账户、托管在该账户中的域名，以及包含本项目完整源码的 GitHub 仓库。通过 Cloudflare Workers Builds 连接仓库即可部署，无需配置 GitHub 部署 Secrets。
 
 源码仓库可以私有保存；现有客户端安装与自动更新依赖可访问的公开 GitHub Releases。
 
-### 1. 配置 Cloudflare Access
+### 1. 连接仓库并部署
 
-1. 在 Cloudflare Zero Trust 中设置团队名，记下 `https://你的团队.cloudflareaccess.com`。
-2. 在 **Integrations → Identity providers** 添加 **Cloudflare**，开启 **Restrict to account members**。
-3. 在 **Access → Applications** 创建自托管应用，域名使用准备给面板的子域名，例如 `monitor.example.com`。登录方式只选择 **Cloudflare**，Allow 策略只允许自己的管理员邮箱，保留标准登录页。复制该应用的 **Application Audience (AUD)**。
-4. 为同一域名的以下路径创建更具体的 Access 应用，使用 **Bypass → Everyone**：`/v1/*`、`/bootstrap/enroll`、`/bootstrap/status`。这些路径由客户端签名或一次性邀请验证；其余页面和 `/api/*` 必须保持 Access 保护。
+在 Cloudflare 控制台进入 **Workers & Pages → Create application → Import a repository**，授权 GitHub 并选择已有仓库。使用以下构建配置：
 
-不要把整个面板域名设为 Bypass。无需添加人机验证。Access 团队域名、AUD 和管理员邮箱需由部署者提供，程序不会从未验证的请求自动认领管理员。
+| 配置 | 值 |
+|---|---|
+| Worker 名称 | `spider-watch` |
+| Root directory | `worker` |
+| Build command | 留空 |
+| Deploy command | `npm run deploy` |
 
-### 2. 设置 GitHub 部署参数
+点击 **Save and Deploy**。Cloudflare 一起发布前端、Worker 和 SQLite Durable Object；首次部署自动生成并保存注册邀请密钥，后续部署继续保留。
 
-在仓库 **Settings → Secrets and variables → Actions** 中设置：
+首次部署会提供 `workers.dev` 地址。登录配置未完成时，页面只显示配置提示，不能取得管理权限。
 
-| 类型 | 名称 | 内容 |
-|---|---|---|
-| Secret | `CLOUDFLARE_API_TOKEN` | Cloudflare 的 Edit Cloudflare Workers 模板 Token，限定目标账户和域名；需允许 Worker 部署及域名路由配置 |
-| Secret | `INVITATION_SECRET` | 至少 32 字符的随机密钥，保持固定；用于签发短期注册邀请 |
-| Variable | `CLOUDFLARE_ACCOUNT_ID` | 目标 Cloudflare 账户 ID |
-| Variable | `PANEL_DOMAIN` | 面板完整域名，不含 `https://` |
-| Variable | `ACCESS_TEAM_DOMAIN` | 第 1 步的团队域名，支持带或不带 `https://` |
-| Variable | `ACCESS_PANEL_AUD` | 面板 Access 应用的 AUD |
-| Variable | `ADMIN_EMAILS` | 允许登录的邮箱，多个用逗号分隔，与 Access 策略一致 |
-| Variable，可选 | `WORKER_NAME` | 默认 `spider-watch`；部署后不要随意改名，否则会创建另一套存储 |
+### 2. 设置域名和 Cloudflare 登录
 
-可用本机 Node.js 生成邀请密钥：`node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`。将结果直接保存到 GitHub Secret，不提交到仓库。
+1. 在该 Worker 的 **Settings → Domains & Routes** 中添加自定义域名，例如 `monitor.example.com`。
+2. 在 Cloudflare Zero Trust 中设置团队名，记下 `https://你的团队.cloudflareaccess.com`；在 **Integrations → Identity providers** 添加 **Cloudflare**，开启 **Restrict to account members**。
+3. 在 **Access → Applications** 创建自托管应用，主机名使用面板域名，保护整个站点。登录方式只选择 **Cloudflare**，Allow 策略只允许指定的管理员邮箱，保留标准登录页。复制该应用的 **Application Audience (AUD)**。使用此处按主机名配置的应用；不要启用 Worker 级的 **Protect this Worker / Protect all Workers**，该模式不支持 WebSocket。
+4. 为同一主机名的以下路径创建更具体的 Access 应用，使用 **Bypass → Everyone**：`/v1/*`、`/bootstrap/enroll`、`/bootstrap/status`。这些路径由客户端签名或一次性邀请验证；其余页面和 `/api/*` 必须保持 Access 保护。不要把整个域名设为 Bypass。
+5. 回到 Worker 的 **Settings → Variables and Secrets**，保存以下三项运行时配置：
 
-### 3. 一键部署
+| 名称 | 内容 |
+|---|---|
+| `ACCESS_TEAM_DOMAIN` | 团队域名，例如 `https://你的团队.cloudflareaccess.com` |
+| `ACCESS_PANEL_AUD` | 面板 Access 应用的 AUD |
+| `ADMIN_EMAILS` | 允许登录的管理员邮箱，多个用逗号分隔，与 Access Allow 策略一致 |
 
-进入 **Actions → Deploy SpiderWatch to Cloudflare → Run workflow**。工作流一起发布前端、Worker、SQLite Durable Object 和自定义域名。完成后打开面板域名，使用 Cloudflare 标准页面登录，默认进入总览。
+自定义域名和 Access 配置完成后，可在 **Domains & Routes** 关闭 `workers.dev`。后续发布会保留控制台中的域名、登录配置和此开关，无需在 GitHub 再填一份。Access 配置不完整时不会自动认领管理员。
 
-部署自动读取当前 `GITHUB_REPOSITORY`，把客户端更新源设为自己的仓库。Fork 后无需修改源码里的仓库地址。部署不会自动创建客户端 Release，先完成下一节的发布步骤。
+### 3. 登录并添加设备
 
-后续更新面板代码后，再运行同一工作流。保持 Worker 名称和 `MONITOR_GROUP` 不变，设备身份和设置会保留。不要仅在 Cloudflare 控制台修改这些部署变量；下一次部署以 GitHub 设置为准。
+打开面板自定义域名，通过 Cloudflare 标准登录页登录。按下节安装客户端，然后在 **管理 → 添加设备** 中复制注册指令，到目标设备执行即可加入网络。
 
-也可以本地部署（Node.js 22 或更新版本）：
+后续推送代码到连接的分支，Cloudflare 会自动重新部署。保持 Worker 名称 `spider-watch` 和 `MONITOR_GROUP` 不变，设备身份与设置会保留。部署面板不会自动创建客户端 Release；需要发布客户端时，按下一节操作。
+
+本地部署备选（Node.js 22 或更新版本）：
 
 ```sh
 cd worker
 npm ci
 npx wrangler login
-npm run setup
+npm run deploy
 ```
 
-按提示填写域名、Access AUD 和邮箱。本地流程自动从 Git 的 `origin` 识别 GitHub 仓库，生成并保存邀请密钥到被 Git 忽略的 `worker/deployment.local.json`，之后重复运行即可。无 Git 元数据的源码包需设置环境变量 `UPDATE_GITHUB_REPOSITORY=拥有者/仓库`。预检查可用 `npm run setup -- --dry-run`，不会上传。
+本地部署使用同一流程，自动识别首次或已有部署；域名和登录配置仍在 Cloudflare 控制台管理。
 
 ## 发布与安装客户端
 

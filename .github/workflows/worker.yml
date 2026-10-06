@@ -18,5 +18,6 @@ jobs:
       - run: npm ci
       - run: npm run types
       - run: npm run check
+      - run: npm run test:deploy
       - run: npm test
       - run: npm run build

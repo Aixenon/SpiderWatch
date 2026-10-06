@@ -48,6 +48,8 @@ Type: files; Name: "{app}\update-result.json"
 Type: filesandordirs; Name: "{app}\.spider-watch-update"
 
 [Code]
+var MaintenanceFailed: Boolean;
+
 function InstallDirectory(Param: String): String;
 begin
   if IsWin64 then Result := ExpandConstant('{commonpf64}\SpiderWatch')
@@ -57,9 +59,24 @@ end;
 function RunMaintenance(Action: String): Boolean;
 var Code: Integer;
 begin
-  Result := Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
-    '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\maintenance\service.ps1') + '" -Action ' + Action,
-    '', SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0);
+  Code := -1;
+  Result := False;
+  try
+    Result := ExecAndLogOutput(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+      '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\maintenance\service.ps1') + '" -Action ' + Action,
+      '', SW_HIDE, ewWaitUntilTerminated, Code, nil) and (Code = 0);
+  except
+    Log(GetExceptionMessage);
+  end;
+  if not Result then begin
+    MaintenanceFailed := True;
+    Log('SpiderWatch maintenance failed: ' + Action + ', exit code ' + IntToStr(Code));
+  end;
+end;
+
+function GetCustomSetupExitCode: Integer;
+begin
+  if MaintenanceFailed then Result := 1 else Result := 0;
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;

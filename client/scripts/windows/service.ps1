@@ -1,5 +1,37 @@
 param([ValidateSet('Install','Remove')][string]$Action = 'Install')
 $ErrorActionPreference = 'Stop'
+
+function ConvertTo-NativeArgument([AllowEmptyString()][string]$Value) {
+    # Windows PowerShell 5 drops embedded quotes in native argument arrays.
+    # Escape the command line explicitly, including trailing backslashes.
+    '"' + ($Value -replace '(\\*)"', '$1$1\"' -replace '(\\+)$', '$1$1') + '"'
+}
+
+function Invoke-MaintenanceProcess([string]$FilePath, [string[]]$Arguments) {
+    $taskStart = New-Object Diagnostics.ProcessStartInfo
+    $taskStart.FileName = $FilePath
+    $taskStart.Arguments = ($Arguments | ForEach-Object { ConvertTo-NativeArgument $_ }) -join ' '
+    $taskStart.UseShellExecute = $false
+    $taskStart.CreateNoWindow = $true
+    $taskStart.RedirectStandardOutput = $true
+    $taskStart.RedirectStandardError = $true
+    $taskProcess = New-Object Diagnostics.Process
+    $taskProcess.StartInfo = $taskStart
+    try {
+        if (!$taskProcess.Start()) { throw 'Cannot start maintenance command' }
+        $taskOutputRead = $taskProcess.StandardOutput.ReadToEndAsync()
+        $taskErrorRead = $taskProcess.StandardError.ReadToEndAsync()
+        $taskProcess.WaitForExit()
+        $taskOutput = $taskOutputRead.Result
+        $taskError = $taskErrorRead.Result
+        if ($taskProcess.ExitCode -ne 0) {
+            throw ('Maintenance command failed (exit ' + $taskProcess.ExitCode + '): ' + $taskOutput + $taskError)
+        }
+        $taskOutput
+    } finally { $taskProcess.Dispose() }
+}
+
+$taskSC = Join-Path $env:SystemRoot 'System32\sc.exe'
 $taskProgramDir = Split-Path -Parent $PSScriptRoot
 $taskBinary = Join-Path $taskProgramDir 'spider-watch.exe'
 $taskRoot = Join-Path $env:ProgramData 'spider-watch'
@@ -12,7 +44,7 @@ if ($taskService -and $taskService.Status -ne 'Stopped') {
 }
 if ($Action -eq 'Remove') {
     Unregister-ScheduledTask -TaskName 'spider-watch-update' -Confirm:$false -ErrorAction SilentlyContinue
-    if ($taskService) { & sc.exe delete spider-watch | Out-Null; if ($LASTEXITCODE) { throw 'Service removal failed' } }
+    if ($taskService) { Invoke-MaintenanceProcess $taskSC @('delete','spider-watch') | Out-Null }
     # Preserve device identity for reinstall. Remove the installation marker so
     # a portable copy does not mistake retained state for a running service.
     $taskMarker = Join-Path $taskRoot 'service-installed'
@@ -38,13 +70,12 @@ $taskStateAcl.SetSecurityDescriptorSddlForm('D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)
 Set-Acl -LiteralPath $taskState -AclObject $taskStateAcl
 $taskCommand = '"' + $taskBinary + '" service-run --config "' + $taskConfig + '"'
 $taskVerb = if ($taskService) { 'config' } else { 'create' }
-& sc.exe $taskVerb spider-watch start= auto obj= 'NT AUTHORITY\LocalService' binPath= $taskCommand | Out-Null
-if ($LASTEXITCODE) { throw 'Service registration failed' }
-& sc.exe description spider-watch 'SpiderWatch network monitor' | Out-Null
-& sc.exe failure spider-watch reset= 86400 actions= 'restart/60000/restart/300000/restart/900000' | Out-Null
-if ($LASTEXITCODE) { throw 'Service recovery setup failed' }
-& sc.exe failureflag spider-watch 1 | Out-Null
-if ($LASTEXITCODE) { throw 'Service recovery setup failed' }
+Invoke-MaintenanceProcess $taskSC @($taskVerb,'spider-watch','start=','auto','obj=','NT AUTHORITY\LocalService','binPath=',$taskCommand) | Out-Null
+$taskRegistered = Get-CimInstance Win32_Service -Filter "Name='spider-watch'" -ErrorAction Stop
+if (!$taskRegistered -or $taskRegistered.PathName -ne $taskCommand -or $taskRegistered.StartName -ne 'NT AUTHORITY\LocalService') { throw 'Service registration did not preserve the executable path or service account' }
+Invoke-MaintenanceProcess $taskSC @('description','spider-watch','SpiderWatch network monitor') | Out-Null
+Invoke-MaintenanceProcess $taskSC @('failure','spider-watch','reset=','86400','actions=','restart/60000/restart/300000/restart/900000') | Out-Null
+Invoke-MaintenanceProcess $taskSC @('failureflag','spider-watch','1') | Out-Null
 Set-Content -LiteralPath (Join-Path $taskRoot 'service-installed') -Value 'state-v2' -Encoding ascii
 $taskUpdate = New-ScheduledTaskAction -Execute $taskBinary -Argument ('update --automatic --config "' + $taskConfig + '"') -WorkingDirectory $taskProgramDir
 $taskTrigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes((Get-Random -Minimum 1 -Maximum 16))) -RepetitionInterval (New-TimeSpan -Hours 6)

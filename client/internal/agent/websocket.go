@@ -28,6 +28,45 @@ type liveControl struct {
 	Sequence    uint64 `json:"sequence"`
 }
 
+type liveEvent struct {
+	control liveControl
+	err     error
+}
+
+// A control frame and the following connection close must share one FIFO.
+// Separate control/error channels let select deliver EOF before an already-read
+// acknowledgement or revocation, losing the server's last protocol decision.
+func readLiveEvents(ctx context.Context, conn *websocket.Conn, events chan<- liveEvent) {
+	send := func(event liveEvent) bool {
+		select {
+		case events <- event:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+	for {
+		kind, data, err := conn.ReadMessage()
+		if err != nil {
+			send(liveEvent{err: errors.New("WebSocket connection interrupted")})
+			return
+		}
+		if kind != websocket.TextMessage {
+			send(liveEvent{err: errors.New("invalid WebSocket control")})
+			return
+		}
+		var message liveControl
+		if json.Unmarshal(data, &message) != nil {
+			send(liveEvent{err: errors.New("invalid WebSocket control")})
+			return
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(liveReadTimeout))
+		if !send(liveEvent{control: message}) {
+			return
+		}
+	}
+}
+
 // Live has one reader and one writer, no upload queue and no retained history.
 // Standard WebSocket Ping/Pong frames keep an idle connection alive without
 // generating Durable Object application-message events.
@@ -79,34 +118,12 @@ func (c *Client) Live(ctx context.Context, collector *Collector, session string,
 	readCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	defer func() { cancel(); conn.Close(); <-done }()
-	controls := make(chan liveControl, 4)
-	readErrors := make(chan error, 1)
+	events := make(chan liveEvent, 4)
 	conn.SetPongHandler(func(string) error { return conn.SetReadDeadline(time.Now().Add(liveReadTimeout)) })
 	_ = conn.SetReadDeadline(time.Now().Add(time.Duration(c.config.Timeout) * time.Second))
 	go func() {
 		defer close(done)
-		for {
-			kind, data, err := conn.ReadMessage()
-			if err != nil {
-				readErrors <- errors.New("WebSocket connection interrupted")
-				return
-			}
-			if kind != websocket.TextMessage {
-				readErrors <- errors.New("invalid WebSocket control")
-				return
-			}
-			var message liveControl
-			if json.Unmarshal(data, &message) != nil {
-				readErrors <- errors.New("invalid WebSocket control")
-				return
-			}
-			_ = conn.SetReadDeadline(time.Now().Add(liveReadTimeout))
-			select {
-			case controls <- message:
-			case <-readCtx.Done():
-				return
-			}
-		}
+		readLiveEvents(readCtx, conn, events)
 	}()
 	ping := time.NewTicker(livePingInterval)
 	defer ping.Stop()
@@ -148,9 +165,11 @@ func (c *Client) Live(ctx context.Context, collector *Collector, session string,
 		case <-ctx.Done():
 			_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "shutdown"), time.Now().Add(time.Second))
 			return ctx.Err()
-		case err := <-readErrors:
-			return err
-		case control := <-controls:
+		case event := <-events:
+			if event.err != nil {
+				return event.err
+			}
+			control := event.control
 			switch control.Type {
 			case "hello_ack":
 				if protocol != 2 || !helloSent || helloAcknowledged {

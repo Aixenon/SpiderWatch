@@ -5,7 +5,7 @@ export function panelAuthFailure(request: Request, response: Response): Response
       !(request.headers.get("Accept")?.includes("text/html") || request.headers.get("Sec-Fetch-Dest") === "document")) return response;
   const status = response.status;
   const [title, description, link] = status === 503
-    ? ["登录尚未配置", "请在 Worker 中配置 Access 团队域名、应用 AUD 和管理员邮箱，并在 Access 应用中仅启用 Cloudflare 登录。", ""]
+    ? ["登录尚未配置", "在 Cloudflare 控制台打开此 Worker 的设置 → 变量和机密，添加以下三个值：<br><code>ACCESS_TEAM_DOMAIN</code>：Access 团队域名<br><code>ACCESS_PANEL_AUD</code>：面板 Access 应用的 AUD<br><code>ADMIN_EMAILS</code>：管理员邮箱，多个邮箱用逗号分隔。<br>保存并部署后刷新页面。", ""]
     : status === 403
       ? ["没有访问权限", "当前 Cloudflare 账户没有此面板的管理权限。", '<a href="/cdn-cgi/access/logout">切换 Cloudflare 账户</a>']
       : ["未通过登录验证", "请检查此域名的 Cloudflare Access 保护配置。正常访问会先进入 Cloudflare 标准登录页面。", '<a href="/auth/login">重新登录</a>'];

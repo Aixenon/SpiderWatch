@@ -1,73 +1,167 @@
-import { readFile, writeFile, rm } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { readFile, writeFile, mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const settingsFile = resolve(root, 'deployment.local.json');
-const configFile = resolve(root, 'wrangler.deploy.local.json');
-const secretFile = resolve(root, 'deploy-secrets.local.json');
-const dry = process.argv.includes('--dry-run');
-const interactive = !process.env.CI && process.stdin.isTTY;
-const prompts = interactive ? createInterface({ input: process.stdin, output: process.stdout }) : null;
-const saved = existsSync(settingsFile) ? JSON.parse(await readFile(settingsFile, 'utf8')) : {};
+const wrangler = resolve(root, 'node_modules/wrangler/bin/wrangler.js');
 const repositoryPattern = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}\/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/;
 
-function repository() {
-  // CI's checkout owner is authoritative after a fork; never reuse saved origin.
-  if (process.env.GITHUB_REPOSITORY) return process.env.GITHUB_REPOSITORY;
-  try {
-    const remote = execFileSync('git', ['config', '--get', 'remote.origin.url'], { cwd: root, encoding: 'utf8', stdio: ['ignore','pipe','ignore'] }).trim();
-    const value = remote.replace(/^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)/, '').replace(/\.git$/, '');
-    if (repositoryPattern.test(value)) return value;
-  } catch {}
-  return process.env.UPDATE_GITHUB_REPOSITORY || '';
+export function identifyRepository(env, remote = '') {
+  let repository = env.GITHUB_REPOSITORY;
+  if (!repository) {
+    try {
+      const url = new URL(remote.replace(/^git@github\.com:/, 'https://github.com/'));
+      if (url.hostname === 'github.com' && ['https:', 'ssh:'].includes(url.protocol)) {
+        repository = url.pathname.slice(1).replace(/\.git$/, '');
+      }
+    } catch {}
+    repository ||= env.UPDATE_GITHUB_REPOSITORY;
+  }
+  if (!repositoryPattern.test(repository || '')) {
+    throw new Error('Cannot identify this GitHub checkout. Set UPDATE_GITHUB_REPOSITORY=OWNER/REPO.');
+  }
+  return repository;
 }
-async function setting(key, label, fallback = '', validate = value => !!value) {
-  let value = process.env[key] || saved[key] || fallback;
-  if (prompts && !process.env[key]) value = (await prompts.question(`${label}${value ? ` [${value}]` : ''}: `)).trim() || value;
-  if (!validate(value)) throw new Error(`Missing or invalid ${key}`);
+
+export function selectAccount(configured, identity) {
+  if (configured && /^[a-f0-9]{32}$/i.test(configured)) return configured;
+  if (configured) throw new Error('Invalid CLOUDFLARE_ACCOUNT_ID.');
+  const accounts = identity?.loggedIn && identity.accounts;
+  if (!Array.isArray(accounts) || accounts.length !== 1) {
+    throw new Error('Set CLOUDFLARE_ACCOUNT_ID to the account that owns this Worker.');
+  }
+  return selectAccount(accounts[0].id);
+}
+
+function credentialHeaders(credential) {
+  if (['api_token', 'oauth'].includes(credential.type) && credential.token) {
+    return { Authorization: `Bearer ${credential.token}` };
+  }
+  if (credential.type === 'api_key' && credential.key && credential.email) {
+    return { 'X-Auth-Key': credential.key, 'X-Auth-Email': credential.email };
+  }
+  throw new Error('Cloudflare authentication unavailable. Run npx wrangler login.');
+}
+
+export async function readDeployment(account, name, credential, request = fetch) {
+  const base = `https://api.cloudflare.com/client/v4/accounts/${account}/workers/scripts/${encodeURIComponent(name)}`;
+  async function get(path, allowMissing = false) {
+    const response = await request(`${base}/${path}`, {
+      headers: credentialHeaders(credential), signal: AbortSignal.timeout(30_000),
+    });
+    const body = await response.json();
+    if (allowMissing && response.status === 404 && body.errors?.some(error => error.code === 10007)) return null;
+    if (!response.ok || body.success !== true) {
+      throw new Error(`Cannot read Worker ${path} (HTTP ${response.status}); deployment stopped without changing credentials.`);
+    }
+    return body.result;
+  }
+  const secrets = await get('secrets', true);
+  if (secrets === null) return { exists: false, hasInvitation: false, workersDev: true, previews: false };
+  if (!Array.isArray(secrets) || secrets.some(secret => typeof secret?.name !== 'string')) {
+    throw new Error('Invalid Worker secrets response; deployment stopped.');
+  }
+  const subdomain = await get('subdomain');
+  if (typeof subdomain?.enabled !== 'boolean' || typeof subdomain?.previews_enabled !== 'boolean') {
+    throw new Error('Invalid Worker subdomain response; deployment stopped.');
+  }
+  return {
+    exists: true, hasInvitation: secrets.some(secret => secret.name === 'INVITATION_SECRET'),
+    workersDev: subdomain.enabled, previews: subdomain.previews_enabled,
+  };
+}
+
+export function invitationFor(state, supplied) {
+  if (state.hasInvitation) return undefined;
+  const value = supplied || randomBytes(32).toString('hex');
+  if (typeof value !== 'string' || value.length < 32 || /[\r\n]/.test(value)) {
+    throw new Error('INVITATION_SECRET must contain at least 32 random characters.');
+  }
   return value;
 }
-try {
-  const repo = repository();
-  if (!repositoryPattern.test(repo)) throw new Error('Cannot identify this GitHub checkout. Set UPDATE_GITHUB_REPOSITORY=OWNER/REPO.');
-  const name = await setting('WORKER_NAME', 'Worker 名称', 'spider-watch', value => /^[a-z0-9][a-z0-9-]{0,62}$/.test(value));
-  const domain = await setting('PANEL_DOMAIN', '面板域名（无 https://）', '', value => /^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/i.test(value));
-  const team = await setting('ACCESS_TEAM_DOMAIN', 'Access 团队域名', '', value => /^(https:\/\/)?[a-z0-9-]+\.cloudflareaccess\.com$/i.test(value));
-  const aud = await setting('ACCESS_PANEL_AUD', 'Access 应用 AUD', '', value => /^[a-f0-9]{64}$/i.test(value));
-  const emails = await setting('ADMIN_EMAILS', '管理员邮箱（逗号分隔）', '', value => value.split(',').every(x => /^[^\s@,]+@[^\s@,]+\.[^\s@,]+$/.test(x.trim())));
-  let invitation = process.env.INVITATION_SECRET || saved.INVITATION_SECRET;
-  if (!invitation && interactive) invitation = randomBytes(32).toString('hex');
-  if (typeof invitation !== 'string' || invitation.length < 32 || /[\r\n]/.test(invitation)) throw new Error('Set a persistent INVITATION_SECRET (at least 32 random characters) in CI secrets.');
-  const config = JSON.parse(await readFile(resolve(root, 'wrangler.jsonc'), 'utf8'));
-  config.name = name;
-  config.routes = [{ pattern: domain, custom_domain: true }];
-  config.workers_dev = false;
-  config.preview_urls = false;
+
+export function deploymentConfig(source, { name, repository, state, account }) {
+  const config = structuredClone(source);
   delete config.env;
-  // Keep the DO storage identity constant across redeployments and forks.
-  Object.assign(config.vars, { ACCESS_TEAM_DOMAIN: team.startsWith('https://') ? team : `https://${team.toLowerCase()}`, ACCESS_PANEL_AUD: aud, ADMIN_EMAILS: emails,
-    UPDATE_GITHUB_REPOSITORY: repo, LOCAL_DEV: 'false' });
-  if (interactive) await writeFile(settingsFile, JSON.stringify({WORKER_NAME:name,PANEL_DOMAIN:domain,
-    ACCESS_TEAM_DOMAIN:team,ACCESS_PANEL_AUD:aud,ADMIN_EMAILS:emails,INVITATION_SECRET:invitation},null,2)+'\n',{mode:0o600});
-  await writeFile(configFile, JSON.stringify(config,null,2)+'\n', {mode:0o600});
-  await writeFile(secretFile, JSON.stringify({INVITATION_SECRET:invitation}), {mode:0o600});
-  prompts?.close();
-  console.log(`SpiderWatch: ${repo} → ${name} → https://${domain}`);
-  const args = [resolve(root,'node_modules/wrangler/bin/wrangler.js'),'deploy','--config',configFile,'--secrets-file',secretFile];
-  if (dry) args.push('--dry-run','--outdir',resolve(root,'dist'));
-  const result = spawnSync(process.execPath,args,{cwd:root,stdio:'inherit',env:process.env});
-  if (result.error) throw result.error;
-  if (result.status !== 0) throw new Error('Cloudflare deployment failed.');
-  console.log(dry ? 'Deployment package verified; nothing uploaded.' : `Deployed. Open https://${domain}/ to log in.`);
-} catch (error) {
-  console.error(error.message); process.exitCode=1;
-} finally {
-  prompts?.close();
-  await rm(secretFile,{force:true});
-  await rm(configFile,{force:true});
+  // Omitted routes preserve domains managed in the Cloudflare dashboard.
+  delete config.routes;
+  delete config.route;
+  delete config.account_id;
+  for (const key of ['ACCESS_TEAM_DOMAIN', 'ACCESS_PANEL_AUD', 'ACCESS_AGENT_AUD', 'ADMIN_EMAILS']) {
+    delete config.vars[key];
+  }
+  Object.assign(config, {
+    name, keep_vars: true, workers_dev: state.workersDev, preview_urls: state.previews,
+    main: resolve(root, source.main),
+    assets: { ...source.assets, directory: resolve(root, source.assets.directory) },
+  });
+  if (account) config.account_id = account;
+  Object.assign(config.vars, { UPDATE_GITHUB_REPOSITORY: repository, LOCAL_DEV: 'false' });
+  return config;
+}
+
+function wranglerJSON(args) {
+  try {
+    return JSON.parse(execFileSync(process.execPath, [wrangler, ...args, '--json'], {
+      cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000,
+    }));
+  } catch {
+    // Credential commands may include secrets in their output: never echo it.
+    throw new Error('Cannot read Cloudflare credentials. Run npx wrangler login, or check the Workers Builds token.');
+  }
+}
+
+export async function main(args = process.argv.slice(2), env = process.env) {
+  if (args.some(arg => arg !== '--dry-run')) throw new Error('Usage: npm run deploy [-- --dry-run]');
+  const dry = args.includes('--dry-run');
+  const source = JSON.parse(await readFile(resolve(root, 'wrangler.jsonc'), 'utf8'));
+  const name = env.WORKER_NAME || source.name;
+  if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(name)) throw new Error('Invalid WORKER_NAME.');
+  let remote = '';
+  try {
+    remote = execFileSync('git', ['config', '--get', 'remote.origin.url'], {
+      cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+  } catch {}
+  const repository = identifyRepository(env, remote);
+  let account;
+  let state = { exists: false, hasInvitation: false, workersDev: true, previews: false };
+  if (!dry) {
+    const configured = env.CLOUDFLARE_ACCOUNT_ID || source.account_id;
+    account = selectAccount(configured, configured ? undefined : wranglerJSON(['whoami']));
+    const credential = env.CLOUDFLARE_API_TOKEN
+      ? { type: 'api_token', token: env.CLOUDFLARE_API_TOKEN }
+      : wranglerJSON(['auth', 'token']);
+    state = await readDeployment(account, name, credential);
+  }
+  const config = deploymentConfig(source, { name, repository, state, account });
+  const invitation = invitationFor(state, env.INVITATION_SECRET);
+  const tempRoot = resolve(root, '.tmp');
+  await mkdir(tempRoot, { recursive: true, mode: 0o700 });
+  const temp = await mkdtemp(resolve(tempRoot, 'deploy-'));
+  try {
+    const configFile = resolve(temp, 'wrangler.json');
+    await writeFile(configFile, JSON.stringify(config, null, 2), { mode: 0o600 });
+    const command = [wrangler, 'deploy', '--config', configFile, '--keep-vars'];
+    if (invitation) {
+      const secretFile = resolve(temp, 'secrets.json');
+      await writeFile(secretFile, JSON.stringify({ INVITATION_SECRET: invitation }), { mode: 0o600 });
+      command.push('--secrets-file', secretFile);
+    }
+    if (dry) command.push('--dry-run', '--outdir', resolve(root, 'dist'));
+    console.log(`SpiderWatch: ${repository} → ${name}`);
+    const result = spawnSync(process.execPath, command, { cwd: root, stdio: 'inherit', env });
+    if (result.error || result.status !== 0) throw new Error('Cloudflare deployment failed.');
+    console.log(dry ? 'Deployment package verified; nothing uploaded.'
+      : 'Deployed. Configure the domain and Access in Cloudflare, then open your panel.');
+  } finally {
+    // Only the unique directory created by this invocation is removed.
+    await rm(temp, { recursive: true, force: true });
+  }
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch(error => { console.error(error.message); process.exitCode = 1; });
 }

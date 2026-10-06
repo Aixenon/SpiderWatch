@@ -11,7 +11,10 @@ export type UpdateState = { config: UpdateConfig; source: UpdateCache };
 export class UpdateSourceError extends Error {
   constructor(readonly code: string, readonly status = 502, readonly retryMs = UPDATE_RETRY_MS) { super(code); }
 }
-export const updateRepository = (env: Env): string => /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,99}\/[a-zA-Z0-9][a-zA-Z0-9_.-]{0,99}$/.test(env.UPDATE_GITHUB_REPOSITORY || "") ? env.UPDATE_GITHUB_REPOSITORY : "";
+export function updateRepository(env: Env): string {
+  const repository = env.UPDATE_GITHUB_REPOSITORY || "";
+  return /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,99}\/[a-zA-Z0-9][a-zA-Z0-9_.-]{0,99}$/.test(repository) ? repository : "";
+}
 export const emptyUpdateCache = (repository: string): UpdateCache => ({ repository, current: null, previous: null, checked_at: 0, last_attempt_at: 0, retry_at: 0, error: null });
 export function validUpdatePath(value: unknown): value is string {
   return typeof value === "string" && value.length <= 64 && /^[a-z0-9]+(?:[-/][a-z0-9]+)*$/.test(value)

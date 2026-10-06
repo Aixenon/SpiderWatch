@@ -23,13 +23,21 @@ function noStorage() {
 }
 
 it("keeps an unconfigured deployment closed and gives browser navigation a setup message", async () => {
-  const storage = noStorage(), configured = { ...env, LOCAL_DEV: "false", ACCESS_TEAM_DOMAIN: "", ACCESS_PANEL_AUD: "" };
+  const storage = noStorage(), configured = { ...env, LOCAL_DEV: "false" };
+  const assets = vi.spyOn(env.ASSETS, "fetch");
+  for (const key of ["ACCESS_TEAM_DOMAIN", "ACCESS_PANEL_AUD", "ADMIN_EMAILS"]) Reflect.deleteProperty(configured, key);
   const api = await worker.fetch(new Request("https://monitor.example.test/api/session", { headers: { Accept: "text/html" } }), configured);
   expect(api.status).toBe(503); expect(await api.json()).toEqual({ code: "access_not_configured" });
   const page = await worker.fetch(new Request("https://monitor.example.test/", { headers: { Accept: "text/html" } }), configured);
   expect(page.status).toBe(503); expect(page.headers.get("Cache-Control")).toBe("no-store");
   expect(page.headers.get("Content-Security-Policy")).toContain("frame-ancestors 'none'");
-  expect(await page.text()).toContain("登录尚未配置"); expect(storage).not.toHaveBeenCalled();
+  const body = await page.text();
+  expect(body).toContain("登录尚未配置");
+  expect(body).toContain("Cloudflare 控制台");
+  for (const key of ["ACCESS_TEAM_DOMAIN", "ACCESS_PANEL_AUD", "ADMIN_EMAILS"]) expect(body).toContain(key);
+  const head = await worker.fetch(new Request("https://monitor.example.test/", { method: "HEAD", headers: { Accept: "text/html" } }), configured);
+  expect(head.status).toBe(503); expect(await head.text()).toBe("");
+  expect(storage).not.toHaveBeenCalled(); expect(assets).not.toHaveBeenCalled();
 });
 
 it("protects the session, panel, assets and live upgrade against missing or forged identity headers", async () => {
