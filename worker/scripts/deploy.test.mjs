@@ -2,10 +2,13 @@ import assert from 'node:assert/strict';
 import { afterEach, beforeEach, mock, test } from 'node:test';
 import childProcess from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { syncBuiltinESMExports } from 'node:module';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { deploymentConfig, identifyRepository, invitationFor, sessionFor, main, readDeployment, selectAccount } from './deploy.mjs';
+import { deploymentConfig, identifyRepository, invitationFor, sessionFor, main as deployMain, readDeployment, selectAccount } from './deploy.mjs';
+import { makeClientReleaseFixture } from './client-assets-fixture.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const account = 'a'.repeat(32);
@@ -13,15 +16,21 @@ const credential = { type: 'api_token', token: 'fixture-api-token' };
 const newState = { exists: false, hasInvitation: false, hasSession: false, workersDev: false, previews: false };
 const existingState = { exists: true, hasInvitation: true, hasSession: true, workersDev: false, previews: false };
 const success = result => Response.json({ success: true, result });
+let fixtureDirectory, releaseDirectory, assetsDirectory;
+const main = (args = [], env = {}) => deployMain(args, { SPIDER_RELEASE_DIR: releaseDirectory, ...env }, { assetsDirectory });
 
-beforeEach(() => {
+beforeEach(async () => {
+  fixtureDirectory = await mkdtemp(resolve(tmpdir(), 'spider-watch-deploy-test-'));
+  releaseDirectory = resolve(fixtureDirectory, 'release');
+  assetsDirectory = resolve(fixtureDirectory, 'assets');
+  await makeClientReleaseFixture(releaseDirectory);
   // Every network and subprocess boundary is closed unless a test supplies a fake.
   mock.method(globalThis, 'fetch', async () => { throw new Error('Unexpected network access'); });
   mock.method(childProcess, 'execFileSync', () => { throw new Error('Unexpected subprocess'); });
   mock.method(childProcess, 'spawnSync', () => { throw new Error('Unexpected deployment'); });
   syncBuiltinESMExports();
 });
-afterEach(() => { mock.restoreAll(); syncBuiltinESMExports(); });
+afterEach(async () => { mock.restoreAll(); syncBuiltinESMExports(); await rm(fixtureDirectory, { recursive: true, force: true }); });
 
 test('uses the current checkout repository after a fork and accepts GitHub checkout URL forms', () => {
   assert.equal(identifyRepository({ GITHUB_REPOSITORY: 'fork/SpiderWatch', UPDATE_GITHUB_REPOSITORY: 'stale/old' }, 'https://github.com/upstream/old.git'), 'fork/SpiderWatch');
@@ -167,7 +176,7 @@ function fakeDeployment({ secrets = [{ name: 'INVITATION_SECRET' }, { name: 'SES
   mock.method(console, 'log', value => logs.push(String(value)));
   mock.method(childProcess, 'execFileSync', (command, args) => {
     calls.push([command, args]);
-    if (command === 'git') return 'https://github.com/fixture/SpiderWatch.git\n';
+    if (command === 'git') return args[0] === 'rev-parse' ? 'a'.repeat(40) + '\n' : 'https://github.com/fixture/SpiderWatch.git\n';
     if (authError) throw new Error('fixture-sensitive-auth-output');
     if (args.includes('whoami')) return JSON.stringify({ loggedIn: true, accounts: [{ id: account }] });
     if (args.includes('token')) return JSON.stringify(credential);
@@ -201,7 +210,10 @@ test('redeployment keeps existing credentials and removes only its temporary dep
   await main([], { GITHUB_REPOSITORY: 'fixture/SpiderWatch' });
   assert.equal(fixture.uploads.length, 1);
   assert.equal(fixture.panelBuilds.length, 2);
-  assert.equal(fixture.uploads[0].config.assets.directory, resolve(root, 'dist/panel'));
+  assert.equal(fixture.uploads[0].config.assets.directory, assetsDirectory);
+  const packaged = JSON.parse(readFileSync(resolve(assetsDirectory, '_downloads/current.json'), 'utf8'));
+  assert.equal(packaged.files.length, 27);
+  assert.equal(packaged.revision, 'a'.repeat(40));
   const upload = fixture.uploads[0];
   assert.equal(upload.secrets, undefined);
   assert.equal(upload.config.account_id, account);
@@ -235,7 +247,7 @@ test('redeployment disables remotely enabled URLs according to the source defaul
 test('uploads independent invitation and session secrets only when absent', async () => {
   const fixture = fakeDeployment({ secrets: [{ name: 'UNRELATED_SECRET' }] });
   await main([], { GITHUB_REPOSITORY: 'fixture/SpiderWatch', CLOUDFLARE_ACCOUNT_ID: account, CLOUDFLARE_API_TOKEN: credential.token });
-  assert.equal(fixture.calls.length, 1); // Only the checkout lookup; credentials are already supplied.
+  assert.equal(fixture.calls.length, 2); // Only checkout lookups; credentials are already supplied.
   const upload = fixture.uploads[0];
   assert.deepEqual(Object.keys(upload.secrets), ['INVITATION_SECRET', 'SESSION_SECRET']);
   assert.match(upload.secrets.INVITATION_SECRET, /^[a-f0-9]{64}$/);
@@ -286,7 +298,7 @@ test('metadata permission failures never fall through to a first deployment', as
 test('dry run does not read account credentials or make Cloudflare requests', async () => {
   const fixture = fakeDeployment();
   await main(['--dry-run'], { GITHUB_REPOSITORY: 'fixture/SpiderWatch' });
-  assert.equal(fixture.calls.length, 1);
+  assert.equal(fixture.calls.length, 2);
   assert.equal(fixture.calls[0][0], 'git');
   assert.equal(fixture.request.mock.callCount(), 0);
   assert.ok(fixture.uploads[0].args.includes('--dry-run'));
@@ -307,5 +319,31 @@ test('a failed panel build cannot publish stale assets', async () => {
   const fixture = fakeDeployment({ panelStatus: 1 });
   await assert.rejects(main(['--dry-run'], { GITHUB_REPOSITORY: 'fixture/SpiderWatch' }), /Panel type check failed/);
   assert.equal(fixture.uploads.length, 0);
+  assert.equal(fixture.request.mock.callCount(), 0);
+});
+
+test('an incomplete client build cannot authenticate, build or deploy a partial update', async () => {
+  const fixture = fakeDeployment();
+  await rm(resolve(releaseDirectory, 'spider-watch-windows-amd64-setup.exe'));
+  await assert.rejects(main([], { GITHUB_REPOSITORY: 'fixture/SpiderWatch' }), /Missing client artifact/);
+  assert.equal(fixture.request.mock.callCount(), 0);
+  assert.equal(fixture.deploy.mock.callCount(), 0);
+  assert.equal(fixture.calls.length, 2);
+});
+
+test('local deployment checks the checkout commit instead of trusting an older artifact', async () => {
+  const fixture = fakeDeployment();
+  await makeClientReleaseFixture(releaseDirectory, { revision: 'b'.repeat(40) });
+  await assert.rejects(main([], { GITHUB_REPOSITORY: 'fixture/SpiderWatch' }), /different source commit/);
+  assert.equal(fixture.request.mock.callCount(), 0);
+  assert.equal(fixture.deploy.mock.callCount(), 0);
+  assert.deepEqual(fixture.calls[1][1], ['rev-parse', 'HEAD']);
+});
+
+test('CI uses its exact source commit and refuses malformed revision values before deployment', async () => {
+  const fixture = fakeDeployment();
+  await main(['--dry-run'], { GITHUB_REPOSITORY: 'fixture/SpiderWatch', GITHUB_SHA: 'a'.repeat(40) });
+  assert.equal(fixture.calls.length, 1);
+  await assert.rejects(main([], { GITHUB_REPOSITORY: 'fixture/SpiderWatch', GITHUB_SHA: 'main' }), /Cannot identify the source commit/);
   assert.equal(fixture.request.mock.callCount(), 0);
 });

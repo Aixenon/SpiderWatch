@@ -9,15 +9,23 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).parent.resolve()
-SHELL = shutil.which('sh') or os.environ.get('SPIDER_TEST_SHELL')
+SHELL = os.environ.get('SPIDER_TEST_SHELL') or shutil.which('sh')
+SHELL_ENV = dict(os.environ)
+if os.name == 'nt' and SHELL:
+    shell_directory = Path(SHELL).resolve().parent
+    tool_directories = [shell_directory, shell_directory.parent / 'usr' / 'bin']
+    SHELL_ENV['PATH'] = os.pathsep.join([str(path) for path in tool_directories if path.is_dir()]
+                                      + [SHELL_ENV.get('PATH', '')])
 POWERSHELL = shutil.which('powershell') if os.name == 'nt' else None
-SERVER = "https://monitor.example.test/#invite=one'two$()&three"
+TOKEN = 'a' * 32 + '.1791288000000.' + 'b' * 41 + '%2B%2F%3D'
+SERVER = 'https://monitor.example.test/#invite=' + TOKEN
 NETWORK = 'abcd1234EFGH5678'
 
 
 @unittest.skipUnless(SHELL, 'requires a POSIX shell')
 class UnixEnrollmentTests(unittest.TestCase):
-    def install(self, registration_exit=0, extra=None):
+    def install(self, registration_exit=0, extra=None, checksum_duplicate=False,
+                manifest_version='1.2.3', elevate=False):
         with tempfile.TemporaryDirectory(prefix='.installer-test-', dir=ROOT) as directory:
             root = Path(directory)
             binary = root / 'binary'
@@ -27,23 +35,43 @@ printf '%s\\n' "$@" > "$TEST_ARGUMENTS"
 exit "$TEST_REGISTRATION_EXIT"
 ''', newline='\n')
             checksum = hashlib.sha256(binary.read_bytes()).hexdigest()
-            (root / 'checksums').write_text(f'{checksum}  spider-watch-linux-amd64\n')
+            checksums = f'{checksum}  spider-watch-linux-amd64\n'
+            (root / 'checksums').write_text(checksums * (2 if checksum_duplicate else 1))
+            (root / 'manifest').write_text(json.dumps({'schema': 1, 'version': manifest_version}))
             probes = r'''uname() { printf 'Linux\n'; }
 curl() {
-  url=; target=
+  url=; target=; redirects=; protocols=
   while [ "$#" -gt 0 ]; do
-    case "$1" in https://*) url=$1; shift;; -o) target=$2; shift 2;; *) shift;; esac
+    case "$1" in https://*|http://*) url=$1; shift;; -o) target=$2; shift 2;; --max-redirs) redirects=$2; shift 2;; --proto) protocols=$2; shift 2;; *) shift;; esac
   done
+  printf '%s\n' "$url" >> "$TEST_FIXTURES/downloads"
   case "$url" in
     https://github.com/owner/fork/releases/download/v1.2.3/checksums.txt) cp "$TEST_FIXTURES/checksums" "$target";;
     https://github.com/owner/fork/releases/download/v1.2.3/spider-watch-linux-amd64) cp "$TEST_FIXTURES/binary" "$target";;
+    https://monitor.example.test/install.sh) cp "$TEST_INSTALLER" "$target";;
+    https://monitor.example.test/bootstrap/install/*|http://127.0.0.1/bootstrap/install/*|http://\[::1\]:8788/bootstrap/install/*)
+      [ "$redirects" = 0 ] || return 93
+      case "$url" in http://*) [ "$protocols" = '=http,https' ] || return 94;; *) [ "$protocols" = '=https' ] || return 95;; esac
+      case "$url" in
+        */current.json) cp "$TEST_FIXTURES/manifest" "$target";;
+        */1.2.3/checksums.txt) cp "$TEST_FIXTURES/checksums" "$target";;
+        */1.2.3/spider-watch-linux-amd64) cp "$TEST_FIXTURES/binary" "$target";;
+        *) return 92;;
+      esac;;
     *) printf 'Unexpected download URL\n' >&2; return 91;;
   esac
+}
+id() { printf '1000\n'; }
+sudo() {
+  [ "$1" = sh ] && [ -s "$2" ] || return 96
+  cmp "$2" "$TEST_INSTALLER" || return 97
+  shift 2
+  printf '%s\n' "$@" > "$TEST_ARGUMENTS"
 }
 script=$TEST_INSTALLER
 '''
             arguments = root / 'arguments'
-            env = {**os.environ, 'TEST_FIXTURES': str(root).replace('\\', '/'),
+            env = {**SHELL_ENV, 'TEST_FIXTURES': str(root).replace('\\', '/'),
                    'TEST_INSTALLER': str(ROOT / 'install.sh').replace('\\', '/'),
                    'TEST_ARGUMENTS': str(arguments).replace('\\', '/'),
                    'TEST_REGISTRATION_EXIT': str(registration_exit)}
@@ -51,8 +79,9 @@ script=$TEST_INSTALLER
             prefix = str(root / 'installed').replace('\\', '/')
             if os.name == 'nt':
                 prefix = '/' + prefix[0].lower() + prefix[2:]
-            args = ['--repo', 'owner/fork', '--version', 'v1.2.3', '--arch', 'amd64',
-                    '--no-service', '--prefix', prefix]
+            args = ['--repo', 'owner/fork', '--version', 'v1.2.3', '--arch', 'amd64']
+            if not elevate:
+                args += ['--no-service', '--prefix', prefix]
             args += extra if extra is not None else ['--server', SERVER, '--join', NETWORK]
             # Environment values avoid MSYS's additional command-line parsing
             # when launching sh from Windows; the POSIX script still receives
@@ -61,12 +90,16 @@ script=$TEST_INSTALLER
             probes += 'set -- ' + ' '.join(f'"$TEST_ARG{i}"' for i in range(len(args))) + '\n. "$script"\n'
             result = subprocess.run([SHELL, '-c', probes, 'installer-test'],
                                     env=env, text=True, encoding='utf-8', errors='replace', capture_output=True)
+            self.downloads = (root / 'downloads').read_text().splitlines() if (root / 'downloads').exists() else []
             return result, arguments.read_text().splitlines() if arguments.exists() else None
 
-    def test_install_downloads_from_selected_fork_and_preserves_invitation(self):
+    def test_panel_install_downloads_only_from_worker_and_preserves_invitation(self):
         result, args = self.install()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(args, ['configure', '--server', SERVER, '--join', NETWORK])
+        base = 'https://monitor.example.test/bootstrap/install/' + TOKEN
+        self.assertEqual(self.downloads, [base + '/current.json', base + '/1.2.3/checksums.txt',
+                                         base + '/1.2.3/spider-watch-linux-amd64'])
 
     def test_failed_registration_does_not_report_installation_success(self):
         result, _ = self.install(registration_exit=23)
@@ -84,14 +117,85 @@ script=$TEST_INSTALLER
         result, args = self.install(extra=[])
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIsNone(args)
-        result, args = self.install(extra=['--server', 'http://127.0.0.1/#invite=local',
-                                         '--join', NETWORK, '--allow-local-http'])
+        self.assertTrue(all(url.startswith('https://github.com/owner/fork/') for url in self.downloads))
+        for origin in ['http://127.0.0.1', 'http://[::1]:8788']:
+            result, args = self.install(extra=['--server', origin + '/#invite=' + TOKEN,
+                                             '--join', NETWORK, '--allow-local-http'])
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(args[-1], '--allow-local-http')
+
+    def test_untrusted_invitation_urls_fail_before_download(self):
+        for server in [SERVER.replace('https:', 'http:'),
+                       SERVER.replace('monitor.example.test', 'name:secret@monitor.example.test'),
+                       SERVER.replace('/#', '/other/#'), SERVER + '&other=1',
+                       SERVER.replace('%2B', '%252B'), SERVER + '\nhttps://other.test/',
+                       "https://monitor.example.test/#invite=one'two$()&three"]:
+            result, args = self.install(extra=['--server', server, '--join', NETWORK, '--allow-local-http'])
+            self.assertNotEqual(result.returncode, 0, server)
+            self.assertIsNone(args)
+            self.assertEqual(self.downloads, [])
+
+    def test_duplicate_checksums_and_malformed_versions_are_rejected(self):
+        result, args = self.install(checksum_duplicate=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIsNone(args)
+        self.assertIn('duplicate SHA-256', result.stderr)
+        for version in ['1.2.3-dev', '1.2.3/../../other', '1.2.3\n9.9.9']:
+            result, args = self.install(manifest_version=version)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIsNone(args)
+
+    def test_nonroot_pipeline_elevates_a_complete_same_origin_script(self):
+        result, args = self.install(elevate=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(args[-1], '--allow-local-http')
+        self.assertEqual(self.downloads, ['https://monitor.example.test/install.sh'])
+        self.assertEqual(args[-4:], ['--server', SERVER, '--join', NETWORK])
+
+    def test_truncated_pipeline_never_starts_installation(self):
+        script = (ROOT / 'install.sh').read_text()
+        partial = script[:script.index('    procd)')]
+        result = subprocess.run([SHELL], input=partial, env=SHELL_ENV, text=True, capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, '')
 
 
 @unittest.skipUnless(POWERSHELL, 'requires Windows PowerShell')
 class WindowsEnrollmentTests(unittest.TestCase):
+    def download_source(self, server=SERVER, local=False):
+        script = r'''
+$ErrorActionPreference = 'Stop'
+$source = Get-Content -LiteralPath $env:TEST_INSTALLER -Raw
+$boundary = $source.IndexOf('    $taskIdentity =')
+if ($boundary -lt 0) { throw 'Cannot find the installer privilege boundary' }
+# Run the real argument and URL validation before any privilege or file work.
+$source = $source.Substring(0, $boundary) + "`n}`n" + @'
+Write-Output ('RESULT:' + (@{base=$taskWorkerBase; protocols=$taskProtocols; redirects=$taskRedirects} | ConvertTo-Json -Compress))
+'@
+try { & ([scriptblock]::Create($source)) -Server $env:TEST_SERVER -Join $env:TEST_NETWORK -AllowLocalHttp:($env:TEST_LOCAL -eq 'yes') }
+catch { Write-Output 'RESULT:{"failed":true}' }
+'''
+        env = {**os.environ, 'TEST_INSTALLER': str(ROOT / 'install.ps1'), 'TEST_SERVER': server,
+               'TEST_NETWORK': NETWORK, 'TEST_LOCAL': 'yes' if local else 'no'}
+        result = subprocess.run([POWERSHELL, '-NoProfile', '-NonInteractive', '-Command', script],
+                                env=env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        line = next(line for line in result.stdout.splitlines() if line.startswith('RESULT:'))
+        return json.loads(line.removeprefix('RESULT:'))
+
+    def test_panel_invitation_selects_worker_origin_without_redirects(self):
+        result = self.download_source()
+        self.assertEqual(result, {'base': 'https://monitor.example.test/bootstrap/install/' + TOKEN,
+                                  'protocols': '=https', 'redirects': 0})
+        result = self.download_source('http://[::1]:8788/#invite=' + TOKEN, local=True)
+        self.assertEqual(result['base'], 'http://[::1]:8788/bootstrap/install/' + TOKEN)
+        self.assertEqual(result['protocols'], '=http,https')
+
+    def test_invalid_windows_download_origins_are_rejected(self):
+        for server in [SERVER.replace('https:', 'http:'), SERVER + '&other=1',
+                       SERVER.replace('/#', '/other/#'),
+                       SERVER.replace('monitor.example.test', 'name:secret@monitor.example.test')]:
+            self.assertTrue(self.download_source(server, local=True)['failed'])
+
     def registration(self, exit_code=0, local=False):
         # Extract only the final registration block, after the installer has
         # completed. The replacement client function performs no installation.

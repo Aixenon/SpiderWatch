@@ -2,6 +2,7 @@ import { authorize, handleLogin } from "./auth";
 import { json } from "./model";
 import { handleUpdates, isUpdatePath } from "./updates";
 import { signedHeadersValid, verifyInvitation } from "./identity";
+import { handleInstallDownload, handlePanelDownload, isInstallPath } from "./install-downloads";
 import { panelAuthFailure } from "./panel-auth";
 export { MonitorGroup } from "./monitor";
 
@@ -15,7 +16,7 @@ function reservedPanelPath(path: string): boolean {
   // removed. No panel URL can enter a device or internal authentication path.
   try { path = decodeURIComponent(path); }
   catch { return true; }
-  return path.startsWith("//") || path.includes("\\") || /^\/(?:v1|bootstrap|internal|agent-releases)(?:\/|$)/.test(path);
+  return path.startsWith("//") || path.includes("\\") || /^\/(?:v1|bootstrap|internal|agent-releases|_downloads)(?:\/|$)/.test(path);
 }
 
 async function panelAsset(request: Request, env: Env): Promise<Response> {
@@ -43,6 +44,7 @@ export default {
     const url = new URL(request.url);
     const local = env.LOCAL_DEV === "true" && ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname);
     if (env.LOCAL_DEV === "true" && !local) return json({ code: "local_mode_requires_loopback" }, 403);
+    if (isInstallPath(url.pathname)) return handleInstallDownload(request, env, local);
     if (url.pathname === "/" || url.pathname === "/panel") {
       if (!["GET", "HEAD"].includes(request.method)) return json({ code: "method_not_allowed" }, 405);
       return new Response(null, { status: 302, headers: { Location: "/panel/", "Cache-Control": "no-store" } });
@@ -92,13 +94,14 @@ export default {
     const mutation = !["GET", "HEAD"].includes(request.method);
     const upgrade = request.headers.get("Upgrade")?.toLowerCase() === "websocket";
     if (!bootstrap && !agent && (mutation || upgrade) && request.headers.get("Origin") !== url.origin) return json({ code: "origin_rejected" }, 403);
-    // Only small update settings/metadata enter the DO; binaries stream from GitHub.
+    // Only authorization and small settings enter the DO; binaries stream from ASSETS.
     if (isUpdatePath(url.pathname)) {
       if (agent && !hasDeviceCredentials(request)) return json({code:"device_auth_required"},401);
       return handleUpdates(request, env);
     }
     if (request.method === "GET" && (url.pathname === "/v1/live" || /^\/v1\/nodes\/[a-f0-9]{32}\/status$/.test(url.pathname))
       && !hasDeviceCredentials(request)) return json({ code: "device_auth_required" }, 401);
+    if (panel && url.pathname.startsWith("/downloads/")) return handlePanelDownload(request, env);
     if (!bootstrap && !agent && !url.pathname.startsWith("/api/")) {
       if (mutation) return json({ code: "method_not_allowed" }, 405);
       return panelAsset(request, env);

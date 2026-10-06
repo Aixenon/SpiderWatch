@@ -13,6 +13,7 @@ type HostInfo struct {
 	CPUModel     string `json:"cpu_model,omitempty"`
 	PhysicalCPUs int    `json:"physical_cpus,omitempty"`
 	Version      string `json:"agent_version,omitempty"`
+	Revision     string `json:"agent_revision,omitempty"`
 }
 
 // Live protocol 2 binds identity/version to the authenticated connection. Only

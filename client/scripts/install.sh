@@ -1,5 +1,6 @@
 #!/bin/sh
 # Linux and macOS bootstrap; binaries are independent of Linux distribution/libc.
+main() {
 set -eu
 repo=${SPIDER_WATCH_REPOSITORY:-__SPIDER_REPOSITORY__}
 version=__SPIDER_VERSION__
@@ -10,7 +11,11 @@ detect_only=no
 server=
 join=
 allow_local_http=no
+worker_base=
+download_protocols='=https'
+download_redirects=3
 die() { printf '%s\n' "$*" >&2; exit 1; }
+download() { curl --fail --silent --show-error --location --max-redirs "$download_redirects" --proto "$download_protocols" --proto-redir "$download_protocols" --connect-timeout 10 --max-time 180 --max-filesize "$3" "$1" -o "$2"; }
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --repo|--version|--arch|--prefix|--server|--join) [ "$#" -ge 2 ] && [ -n "$2" ] || die "Missing value for $1"; key=$1; value=$2; shift 2
@@ -23,8 +28,26 @@ while [ "$#" -gt 0 ]; do
 done
 if [ -n "$server" ] || [ -n "$join" ]; then
   [ -n "$server" ] && [ -n "$join" ] || die '--server and --join must be used together.'
+  case "$server$join" in *[![:graph:]]*) die 'Invalid server URL or network code.';; esac
   printf '%s' "$join" | grep -Eq '^([A-Za-z0-9]{16}|[0-9]{12})$' || die 'Invalid network code.'
-  case "$server" in https://*) ;; http://*) [ "$allow_local_http" = yes ] || die 'The server must use HTTPS.';; *) die 'The server must use HTTPS.';; esac
+  case "$server" in *'#invite='*) ;; *) die 'Use the complete invitation URL from the panel.';; esac
+  origin=${server%%#*}; origin=${origin%/}
+  printf '%s' "$origin" | grep -Eq '^https?://([A-Za-z0-9.-]+|\[[A-Fa-f0-9:]+\])(:[0-9]{1,5})?$' || die 'Invalid server origin.'
+  case "$origin" in
+    https://*) ;;
+    http://*)
+      [ "$allow_local_http" = yes ] || die 'The server must use HTTPS.'
+      printf '%s' "$origin" | grep -Eq '^http://(localhost|127\.0\.0\.1|\[::1\])(:[0-9]{1,5})?$' || die 'HTTP is allowed only on loopback.'
+      download_protocols='=http,https';;
+    *) die 'The server must use HTTPS.';;
+  esac
+  invitation=${server#*#invite=}
+  # The panel encodes the standard base64 signature for a URL fragment. Keep
+  # that encoding when putting the token in one path segment.
+  printf '%s' "$invitation" | grep -Eq '^[a-f0-9]{32}\.[0-9]{13}\.([A-Za-z0-9]|%2[BbFf]){43}%3[Dd]$' || die 'Invalid invitation URL.'
+  worker_base=$origin/bootstrap/install/$invitation
+  download_redirects=0
+  version=latest
 fi
 configure() {
   [ -n "$server" ] || return 0
@@ -67,11 +90,28 @@ case "$goos-$arch" in
 esac
 artifact=spider-watch-$goos-$arch
 if [ "$detect_only" = yes ]; then printf '%s\n' "$artifact"; exit 0; fi
-printf '%s' "$repo" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$' || die 'Specify --repo OWNER/REPO.'
-[ "$version" = latest ] || printf '%s' "$version" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || die 'Version must be latest or vX.Y.Z.'
+if [ -z "$worker_base" ]; then
+  printf '%s' "$repo" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$' || die 'Specify --repo OWNER/REPO.'
+  [ "$version" = latest ] || printf '%s' "$version" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || die 'Version must be latest or vX.Y.Z.'
+fi
 command -v curl >/dev/null 2>&1 || die 'curl and CA certificates are required.'
 if [ "$service" = yes ]; then
-  [ "$(id -u)" = 0 ] || die 'Run the installer with sudo, or use --no-service.'
+  if [ "$(id -u)" != 0 ]; then
+    command -v sudo >/dev/null 2>&1 || die 'Run the installer as root, or install sudo.'
+    # A piped shell has no script pathname to re-execute. Save a complete copy
+    # from the same trusted source before asking sudo to run it.
+    elevated_script=$(mktemp "${TMPDIR:-/tmp}/spider-watch-install.XXXXXX")
+    trap 'rm -f "$elevated_script"' EXIT HUP INT TERM
+    if [ -n "$worker_base" ]; then script_url=$origin/install.sh
+    elif [ "$version" = latest ]; then script_url=https://github.com/$repo/releases/latest/download/install.sh
+    else script_url=https://github.com/$repo/releases/download/$version/install.sh; fi
+    download "$script_url" "$elevated_script" 65536
+    set -- --repo "$repo" --version "$version" --arch "$arch" --prefix "$prefix"
+    [ -z "$server" ] || set -- "$@" --server "$server" --join "$join"
+    [ "$allow_local_http" = no ] || set -- "$@" --allow-local-http
+    sudo sh "$elevated_script" "$@"
+    exit $?
+  fi
   [ "$prefix" = /usr/local/bin ] || die 'Custom prefix requires --no-service.'
   if [ "$goos" = darwin ]; then manager=launchd
   elif command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then manager=systemd
@@ -92,16 +132,20 @@ mkdir -p "$prefix"
 [ ! -L "$prefix/spider-watch" ] || die 'Refusing to overwrite a symbolic link.'
 stage=$(mktemp -d "$prefix/.spider-watch-install.XXXXXX")
 trap 'rm -f "$stage/download" "$stage/checksums" "$stage/manifest"; rmdir "$stage"' EXIT HUP INT TERM
-download() { curl --fail --silent --show-error --location --max-redirs 3 --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 180 --max-filesize "$3" "$1" -o "$2"; }
 if [ "$version" = latest ]; then
-  download "https://github.com/$repo/releases/latest/download/update-manifest.json" "$stage/manifest" 65536
-  number=$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([0-9.]*\)".*/\1/p' "$stage/manifest")
+  if [ -n "$worker_base" ]; then manifest_url=$worker_base/current.json
+  else manifest_url=https://github.com/$repo/releases/latest/download/update-manifest.json; fi
+  download "$manifest_url" "$stage/manifest" 65536
+  number=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([0-9.]*\)".*/\1/p' "$stage/manifest")
+  case "$number" in *[!0-9.]*|'') die 'Invalid release version.';; esac
   printf '%s' "$number" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || die 'Invalid release version.'
   version=v$number
 fi
-base=https://github.com/$repo/releases/download/$version
+if [ -n "$worker_base" ]; then base=$worker_base/${version#v}
+else base=https://github.com/$repo/releases/download/$version; fi
 download "$base/checksums.txt" "$stage/checksums" 16384
 expected=$(awk -v name="$artifact" '$2==name {print $1}' "$stage/checksums")
+[ "${#expected}" -eq 64 ] || die 'Missing/duplicate SHA-256 for this platform.'
 printf '%s' "$expected" | grep -Eq '^[a-f0-9]{64}$' || die 'Missing/duplicate SHA-256 for this platform.'
 download "$base/$artifact" "$stage/download" 16777216
 if command -v sha256sum >/dev/null 2>&1; then actual=$(sha256sum "$stage/download" | awk '{print $1}')
@@ -245,3 +289,7 @@ if [ -n "$server" ]; then
 else
   printf 'Installed. Copy the registration command from the panel, then run it with sudo.\n'
 fi
+}
+
+# Installation starts only after the complete function has been received.
+main "$@"

@@ -4,288 +4,242 @@ import { evictDurableObject, reset, runInDurableObject } from "cloudflare:test";
 import { afterEach, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import { hash as credentialHash } from "../src/model";
-import type { UpdateCache } from "../src/update-source";
+import { issueInvitation } from "../src/identity";
 
-const origin = "http://127.0.0.1", repo = "monitor-owner/agent-releases";
+const origin = "http://127.0.0.1", repo = "monitor-owner/agent-releases", node = "a".repeat(32);
+const file = "spider-watch-windows-amd64.exe", hash = "a".repeat(64), revision = "c".repeat(40);
+const setup = "spider-watch-windows-amd64-setup.exe";
+const binary = new TextEncoder().encode("MZ test executable"), installer = new TextEncoder().encode("#!/bin/sh\necho installed\n");
+type Manifest = { version: string; revision: string; assets: { url: string; bytes: number; sha256: string }[] };
+type Options = { scriptLength?: number | null; scriptBody?: Uint8Array; version?: string; revision?: string; metadataStatus?: number; metadata?: unknown; extra?: string; length?: number; encoding?: string; binaryStatus?: number; body?: () => BodyInit; beforeMetadata?: () => Promise<void> };
 const configured = () => ({ ...env, UPDATE_GITHUB_REPOSITORY: repo });
-const file = "spider-watch-windows-amd64.exe", hash = "a".repeat(64);
-const binary = new TextEncoder().encode("MZ test executable");
-type Manifest = { version: string; assets: { url: string; bytes: number; sha256: string }[] };
-type SourceOptions = { version?: string; sha256?: string; apiStatus?: number; apiHeaders?: Record<string, string>; redirect?: string;
-  body?: () => BodyInit; length?: number; encoding?: string; binaryStatus?: number; manifestBytes?: number; extraManifest?: string; beforeAPI?: () => Promise<void> };
-function stub(settings = configured()) { return env.MONITOR.getByName(settings.MONITOR_GROUP); }
+const stub = (settings = configured()) => env.MONITOR.getByName(settings.MONITOR_GROUP);
 async function setDOEnv(settings = configured()) {
-  // Env passed to worker.fetch does not modify the DO's deployment bindings.
-  // Clone only the test instance's env; never mutate the shared test bindings.
   const digest = await credentialHash("b".repeat(64));
-  await runInDurableObject(stub(settings), (instance,ctx) => {
-    Reflect.set(instance, "env", { ...Reflect.get(instance, "env"), UPDATE_GITHUB_REPOSITORY: settings.UPDATE_GITHUB_REPOSITORY });
-    ctx.storage.sql.exec("INSERT OR IGNORE INTO nodes(node_id,name,key_hash,state,host) VALUES (?,'update-fixture',?,'approved','{}')","a".repeat(32),digest);
+  await runInDurableObject(stub(settings), (instance, ctx) => {
+    Reflect.set(instance, "env", { ...Reflect.get(instance, "env"), ASSETS: env.ASSETS, UPDATE_GITHUB_REPOSITORY: settings.UPDATE_GITHUB_REPOSITORY });
+    ctx.storage.sql.exec("INSERT OR IGNORE INTO nodes(node_id,name,key_hash,state,host) VALUES (?,'update-fixture',?,'approved','{}')", node, digest);
   });
 }
 function makeRequest(path: string, method = "GET", body?: unknown) {
   return new Request(path.startsWith("http") ? path : origin + (path.startsWith("/api/") ? "/panel" + path : path), { method,
-    headers: { Origin: origin, "Content-Type": "application/json", "CF-Access-Client-Id": "must-stay-local", "CF-Access-Client-Secret": "must-stay-local", "X-Monitor-Node-ID":"a".repeat(32), Authorization: "Bearer " + "b".repeat(64), "cf-access-jwt-assertion": "must-stay-local" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+    headers: { Origin: origin, "Content-Type": "application/json", "X-Monitor-Update-Protocol": "2", "X-Monitor-Node-ID": node, Authorization: "Bearer " + "b".repeat(64), Cookie: "sensitive=local" },
+    body: body === undefined ? undefined : JSON.stringify(body) });
 }
 async function request(path: string, method = "GET", body?: unknown, settings = configured()) {
   const response = await worker.fetch(makeRequest(path, method, body), settings);
   return new Response(await response.arrayBuffer(), { status: response.status, headers: response.headers });
 }
-function github(options: SourceOptions = {}) {
-  const observed: { url: string; headers: Headers; redirect: RequestInit["redirect"]; signal: AbortSignal | null | undefined }[] = [];
-  const source = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
-    const url = String(input), version = options.version || "0.4.0", digest = options.sha256 || hash;
-    observed.push({ url, headers: new Headers(init?.headers), redirect: init?.redirect, signal: init?.signal });
-    const asset = { os: "windows", arch: "amd64", file, bytes: options.manifestBytes ?? binary.length, sha256: digest, url: "https://attacker.invalid/ignored.exe" };
-    const manifest = JSON.stringify({ schema: 1, version, assets: [asset], ...(options.extraManifest ? { extra: options.extraManifest } : {}) });
-    if (url.startsWith("https://api.github.com/repos/") && url.endsWith("/releases/latest")) {
-      await options.beforeAPI?.();
-      if (options.apiStatus) return new Response(null, { status: options.apiStatus, headers: options.apiHeaders });
-      return Response.json({ tag_name: `v${version}`, draft: false, prerelease: false, assets: [
-        { name: "update-manifest.json", size: manifest.length, state: "uploaded", browser_download_url: "http://169.254.169.254/ignored" },
-        { name: file, size: asset.bytes, digest: `sha256:${digest}`, state: "uploaded" },
-      ] });
+function bundle(options: Options = {}) {
+  const network = vi.spyOn(globalThis, "fetch").mockImplementation(async () => { throw new Error("No runtime external fetch allowed"); });
+  const observed: Request[] = [];
+  const assets = vi.spyOn(env.ASSETS, "fetch").mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const req = new Request(input, init), path = new URL(req.url).pathname;
+    observed.push(req);
+    if (path === "/_downloads/current.json") {
+      await options.beforeMetadata?.();
+      if (options.metadataStatus) return new Response(null, { status: options.metadataStatus });
+      const asset = { os: "windows", arch: "amd64", file, bytes: binary.length, sha256: hash };
+      return Response.json(options.metadata ?? { schema: 1, version: options.version || "0.7.1", revision: options.revision || revision, repository: repo, build: "d".repeat(64),
+        assets: [asset], files: [asset, { file: setup, bytes: binary.length, sha256: hash }, { file: "install.sh", bytes: installer.length, sha256: hash }], extra: options.extra });
     }
-    if (url.endsWith("/update-manifest.json")) return new Response(manifest);
-    if (url.startsWith("https://github.com/") && url.endsWith("/" + file)) {
-      if (options.redirect) return new Response(null, { status: 302, headers: { Location: options.redirect } });
-      return executable();
+    if (path === "/install.sh") return new Response(req.method === "HEAD" ? null : options.scriptBody ?? installer, { headers: {
+      ...(options.scriptLength === null ? {} : { "Content-Length": String(options.scriptLength ?? installer.length) }), "Content-Type": "text/x-shellscript",
+    } });
+    if (path.startsWith("/_downloads/") && [file, setup].some(name => path.endsWith("/" + name))) {
+      const headers = new Headers();
+      if (options.length !== undefined) headers.set("Content-Length", String(options.length));
+      if (options.encoding) headers.set("Content-Encoding", options.encoding);
+      return new Response(req.method === "HEAD" ? null : options.body?.() ?? binary, { status: options.binaryStatus || 200, headers });
     }
-    if (url === "https://release-assets.githubusercontent.com/release.bin") return executable();
-    throw new Error("Unexpected upstream: " + url);
+    return new Response(null, { status: 404 });
   });
-  function executable() {
-    const headers = new Headers({ "Content-Type": "application/octet-stream" });
-    if (options.length !== undefined) headers.set("Content-Length", String(options.length));
-    if (options.encoding) headers.set("Content-Encoding", options.encoding);
-    return new Response(options.body ? options.body() : binary, { status: options.binaryStatus || 200, headers });
-  }
-  return { source, options, observed };
+  return { options, assets, network, observed };
 }
 const enable = (path = "agent/stable", settings = configured()) => request("/api/updates/config", "PUT", { enabled: true, distribution_path: path }, settings);
-const check = (settings = configured()) => request("/v1/update/check", "GET", undefined, settings);
-const getManifest = async () => (await (await request("/v1/updates/agent/stable/manifest.json")).json()) as Manifest;
-async function editCache(edit: (cache: UpdateCache) => void, settings = configured()) {
-  await runInDurableObject(stub(settings), (_, ctx) => {
-    const row = ctx.storage.sql.exec<{ value: string }>("SELECT value FROM config WHERE id=6").toArray()[0];
-    const cache = JSON.parse(row.value) as UpdateCache; edit(cache);
-    ctx.storage.sql.exec("UPDATE config SET value=? WHERE id=6", JSON.stringify(cache));
-  });
-}
-const expire = () => editCache(cache => { cache.checked_at = Date.now() - 301_000; cache.retry_at = 0; });
+const check = () => request("/v1/update/check");
+const manifest = async () => (await (await request("/v1/updates/agent/stable/manifest.json")).json()) as Manifest;
 afterEach(async () => { vi.restoreAllMocks(); await reset(); });
 
-it("fetches release metadata only on enabled demand and streams a same-origin executable", async () => {
-  await setDOEnv(); const remote = github();
-  expect(await (await request("/api/updates/config")).json()).toMatchObject({ enabled: true, ready: false });
-  await request("/api/updates/config", "PUT", { enabled: false, distribution_path: "agent/stable" });
-  expect(await (await check()).json()).toMatchObject({ enabled: false });
-  expect((await enable()).status).toBe(200);
-  expect(remote.source).not.toHaveBeenCalled();
-  expect(await (await check()).json()).toMatchObject({ enabled: true, version: "0.4.0", manifest_url: origin + "/v1/updates/agent/stable/manifest.json" });
-  expect(remote.source).toHaveBeenCalledTimes(2);
-  expect(remote.observed[0].signal).toBe(remote.observed[1].signal);
-  const manifest = await getManifest();
-  expect(manifest.assets[0].url).toBe(`${origin}/v1/updates/agent/stable/0.4.0/${hash}/${file}`);
-  const response = await request(manifest.assets[0].url);
-  expect(new Uint8Array(await response.arrayBuffer())).toEqual(binary);
-  expect(response.headers.get("Cache-Control")).toBe("no-store");
-  expect(response.headers.get("Content-Length")).toBe(String(binary.length));
-  expect(response.headers.get("Location")).toBeNull();
-  expect(remote.source).toHaveBeenCalledTimes(3);
-  for (const observed of remote.observed) {
-    expect(observed.redirect).toBe("manual");
-    for (const secret of ["Authorization", "CF-Access-Client-Id", "CF-Access-Client-Secret", "cf-access-jwt-assertion", "Cookie"]) expect(observed.headers.has(secret)).toBe(false);
-    expect(observed.url).not.toContain("attacker");
-  }
-});
-
-it("persists the five-minute cache through eviction and keeps cache-hit reads free of SQL writes", async () => {
-  await setDOEnv(); const remote = github(); await enable(); await check();
-  await evictDurableObject(stub()); await setDOEnv();
+it("serves the deployed revision and streams same-origin assets without GitHub or source-cache writes", async () => {
+  const source = bundle(); await setDOEnv();
   const snapshot = () => runInDurableObject(stub(), (_, ctx) => ctx.storage.sql.exec("SELECT * FROM config ORDER BY id").toArray());
   const before = await snapshot();
-  for (let index = 0; index < 3; index++) expect((await check()).status).toBe(200);
-  expect((await request("/api/updates/check", "POST", {})).status).toBe(200);
+  expect(await (await check()).json()).toMatchObject({ enabled: true, version: "0.7.1", revision });
+  const metadata = await manifest(); expect(metadata.revision).toBe(revision);
+  expect(metadata.assets[0].url).toBe(`${origin}/v1/updates/agent/stable/0.7.1/${hash}/${file}`);
+  const response = await request(metadata.assets[0].url);
+  expect(new Uint8Array(await response.arrayBuffer())).toEqual(binary);
+  expect(response.headers.get("Content-Length")).toBe(String(binary.length));
+  expect(response.headers.get("Cache-Control")).toContain("no-store");
   expect(await snapshot()).toEqual(before);
-  expect(remote.source).toHaveBeenCalledTimes(2);
-  await expire(); expect((await check()).status).toBe(200);
-  expect(remote.source).toHaveBeenCalledTimes(4);
+  expect(source.network).not.toHaveBeenCalled();
+  for (const req of source.observed) for (const key of ["Authorization", "Cookie", "X-Monitor-Node-ID"]) expect(req.headers.has(key)).toBe(false);
 });
 
-it("coalesces concurrent cold checks without blocking administration and rechecks a concurrent disable", async () => {
-  await setDOEnv();
-  const remote = github();
-  await enable();
-  const responses = await runInDurableObject(stub(), async instance => {
-    let arrived!: () => void, release!: () => void;
-    const started = new Promise<void>(resolve => { arrived = resolve; });
-    const gate = new Promise<void>(resolve => { release = resolve; });
-    remote.options.beforeAPI = async () => { arrived(); await gate; };
-    const headers = { "X-Monitor-Role": "updates", "X-Monitor-Auth-Expires": String(Date.now() + 60_000) };
-    const cold = () => instance.fetch(new Request("http://do/internal/update-state", { method: "POST", headers }));
-    const first = cold(); await started; const second = cold();
-    expect((await instance.fetch(new Request("http://do/internal/update-config", { method: "PUT", headers, body: JSON.stringify({ enabled: false, distribution_path: "other/stable" }) }))).status).toBe(200);
-    release();
-    return Promise.all((await Promise.all([first, second])).map(response => response.json()));
-  });
-  for (const response of responses) expect(response).toMatchObject({ config: { enabled: false, distribution_path: "other/stable" } });
-  expect(remote.source).toHaveBeenCalledTimes(2);
-  expect(await (await check()).json()).toEqual({ enabled: false, version: null, release_tag: null, manifest_url: null });
+it("keeps the exact legacy update JSON schema unless revision support is requested", async () => {
+  bundle(); await setDOEnv();
+  for (const path of ["/v1/update/check", "/v1/updates/agent/stable/manifest.json"]) {
+    const legacy = makeRequest(path); legacy.headers.delete("X-Monitor-Update-Protocol");
+    const response = await worker.fetch(legacy, configured()); expect(response.status).toBe(200);
+    const data = await response.json<Record<string, unknown>>();
+    expect(data).not.toHaveProperty("revision");
+    expect(Object.keys(data).sort()).toEqual((path.endsWith("check") ? ["enabled", "version", "release_tag", "manifest_url"] : ["schema", "version", "release_tag", "assets"]).sort());
+    expect(data.version).toBe("0.7.1");
+  }
 });
 
-it("negative-caches upstream failures, respects rate-limit backoff and reports errors instead of no update", async () => {
-  await setDOEnv(); const remote = github({ apiStatus: 429, apiHeaders: { "Retry-After": "180" } }); await enable();
-  const first = await check(); expect(first.status).toBe(503);
-  expect(await first.json()).toMatchObject({ code: "github_rate_limited" });
-  expect(Number(first.headers.get("Retry-After"))).toBeGreaterThanOrEqual(179);
-  expect((await check()).status).toBe(503); expect(remote.source).toHaveBeenCalledTimes(1);
+it("uses newly deployed metadata immediately, including after DO eviction and on the same base version", async () => {
+  const source = bundle(); await setDOEnv(); await check();
+  source.options.revision = "e".repeat(40);
+  expect(await (await check()).json()).toMatchObject({ revision: "e".repeat(40) });
   await evictDurableObject(stub()); await setDOEnv();
-  expect((await check()).status).toBe(503); expect(remote.source).toHaveBeenCalledTimes(1);
-  expect(await (await request("/api/updates/config")).json()).toMatchObject({ source_error: "github_rate_limited", ready: false });
-  await expire(); remote.options.apiStatus = undefined;
-  expect((await check()).status).toBe(200); expect(remote.source).toHaveBeenCalledTimes(3);
+  expect(await (await check()).json()).toMatchObject({ revision: "e".repeat(40) });
+  expect(await runInDurableObject(stub(), (_, ctx) => ctx.storage.sql.exec("SELECT id FROM config WHERE id=6").toArray())).toEqual([]);
 });
 
-it("retains previous URLs and path aliases while rejecting mutated and regressed releases", async () => {
-  await setDOEnv(); const remote = github(); await enable(); await check();
-  const old = await getManifest();
-  await expire(); remote.options.version = "0.5.0"; expect((await check()).status).toBe(200);
-  expect((await enable("windows/stable")).status).toBe(200);
-  expect((await request(old.assets[0].url)).status).toBe(200);
-  expect((await getManifest()).version).toBe("0.5.0");
-  await expire(); remote.options.sha256 = "b".repeat(64);
-  expect(await (await check()).json()).toMatchObject({ code: "release_changed" });
-  await expire(); remote.options.version = "0.3.0"; remote.options.sha256 = hash;
-  expect(await (await check()).json()).toMatchObject({ code: "release_version_regressed" });
-  expect((await getManifest()).version).toBe("0.5.0");
-  expect((await request(old.assets[0].url)).status).toBe(200);
+it("preserves distribution paths and disabled/manual policies without fetching asset metadata", async () => {
+  const source = bundle(); await setDOEnv();
+  expect(await (await request("/v1/update/automatic")).json()).toMatchObject({ enabled: false });
+  expect(source.assets).not.toHaveBeenCalled();
+  await request(`/api/nodes/${node}`, "PATCH", { auto_update: true });
+  expect(await (await request("/v1/update/automatic")).json()).toMatchObject({ enabled: true });
+  await enable("windows/stable");
+  expect((await manifest()).version).toBe("0.7.1");
+  await request("/api/updates/config", "PUT", { enabled: false, distribution_path: "windows/stable" });
+  const count = source.assets.mock.calls.length;
+  expect(await (await check()).json()).toMatchObject({ enabled: false });
+  expect((await request("/v1/updates/windows/stable/manifest.json")).status).toBe(404);
+  expect(source.assets).toHaveBeenCalledTimes(count);
 });
 
-it("isolates both network settings and cached source repositories", async () => {
-  await setDOEnv(); const remote = github(); await enable(); await check();
-  const other = { ...configured(), MONITOR_GROUP: "separate-network" }; await setDOEnv(other);
-  expect(await (await request("/api/updates/config", "GET", undefined, other)).json()).toMatchObject({ enabled: true, ready: false });
-  const changed = { ...configured(), UPDATE_GITHUB_REPOSITORY: "another-owner/releases" }; await setDOEnv(changed);
-  expect(await (await request("/api/updates/config", "GET", undefined, changed)).json()).toMatchObject({ enabled: true, ready: false });
-  expect(remote.source).toHaveBeenCalledTimes(2);
-  expect((await check(changed)).status).toBe(200);
-  expect(remote.observed[2].url).toContain("/repos/another-owner/releases/");
+it("rechecks revocation and manual-mode changes while static metadata is being read", async () => {
+  const source = bundle(); await setDOEnv(); await request(`/api/nodes/${node}`, "PATCH", { auto_update: true });
+  const result = await runInDurableObject(stub(), async instance => {
+    let started!: () => void, release!: () => void;
+    const arrival = new Promise<void>(resolve => { started = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+    source.options.beforeMetadata = async () => { started(); await gate; };
+    const headers = { "X-Monitor-Role": "updates", "X-Monitor-Auth-Expires": String(Date.now() + 60000), "X-Monitor-Original-URL": origin + "/v1/update/automatic", "X-Monitor-Original-Method": "GET", "X-Monitor-Node-ID": node, Authorization: "Bearer " + "b".repeat(64) };
+    const pending = instance.fetch(new Request("http://do/internal/update-state", { headers })); await arrival;
+    const changed = await instance.fetch(new Request(origin + `/api/nodes/${node}`, { method: "PATCH", headers: { "X-Monitor-Role": "admin", "X-Monitor-Auth-Expires": String(Date.now() + 60000) }, body: JSON.stringify({ auto_update: false }) }));
+    expect(changed.status).toBe(200); release();
+    return (await pending).json();
+  });
+  expect(result).toMatchObject({ config: { enabled: false } });
 });
 
-it("guards Access, Origin, internal paths, old static downloads and unsafe configuration", async () => {
-  const remote = github(), monitor = vi.spyOn(env.MONITOR, "getByName").mockImplementation(() => { throw new Error("should not reach DO"); });
-  const production = { ...githubSettings(), UPDATE_GITHUB_REPOSITORY: configured().UPDATE_GITHUB_REPOSITORY };
-  for (const path of ["/panel/api/updates/config", "/v1/update/check", "/v1/updates/agent/stable/manifest.json"]) expect((await request("https://monitor.example.test" + path, "GET", undefined, production)).status).toBe(401);
-  expect((await worker.fetch(new Request(origin + "/panel/api/updates/config", { method: "PUT", headers: { Origin: "https://attacker.invalid" }, body: "{}" }), configured())).status).toBe(403);
-  for (const path of ["/internal/update-config", "/internal/update-state", "/agent-releases", "/agent-releases/index.json"]) expect((await request(path)).status).toBe(404);
-  for (const path of ["../secret", "/absolute", "agent//stable", "Agent/Stable", "https://example.test", "api/files", "a".repeat(65)]) expect((await enable(path)).status).toBe(400);
-  expect((await enable("agent/stable", { ...env, UPDATE_GITHUB_REPOSITORY: "" })).status).toBe(503);
-  expect((await request("/v1/update/check", "POST", {})).status).toBe(405);
-  expect(monitor).not.toHaveBeenCalled(); expect(remote.source).not.toHaveBeenCalled();
-});
-
-it("limits release metadata and rejects unsupported releases before downloading any program", async () => {
-  await setDOEnv(); const remote = github({ version: "0.4.0-beta.1" }); await enable();
-  expect((await check()).status).toBe(502);
-  for (const change of [{ version: "1000000000.0.0" }, { version: "0.4.0", manifestBytes: 16 * 1024 * 1024 + 1 }, { manifestBytes: binary.length, extraManifest: "a".repeat(64 * 1024) }]) {
-    await expire(); Object.assign(remote.options, change);
-    expect((await check()).status).toBe(502);
+it("requires registered credentials for metadata and binary GET/HEAD, even when the assets exist", async () => {
+  const source = bundle(); await setDOEnv(); const metadata = await manifest();
+  const paths = ["/v1/update/check", "/v1/update/automatic", "/v1/updates/agent/stable/manifest.json", metadata.assets[0].url];
+  const beforeAssets = source.assets.mock.calls.length;
+  for (const path of paths) for (const method of ["GET", "HEAD"]) {
+    const response = await worker.fetch(new Request(path.startsWith("http") ? path : origin + path, { method }), configured());
+    expect(response.status).toBe(401); await response.body?.cancel();
   }
-  expect(remote.observed.some(call => call.url.endsWith(".exe"))).toBe(false);
+  await request(`/api/nodes/${node}`, "DELETE");
+  for (const path of paths) for (const method of ["GET", "HEAD"]) expect((await request(path, method)).status).toBe(403);
+  expect(source.assets).toHaveBeenCalledTimes(beforeAssets);
+  expect(source.network).not.toHaveBeenCalled();
 });
 
-it("follows allowed GitHub redirects server-side and rejects dangerous redirect targets", async () => {
-  await setDOEnv(); const remote = github({ redirect: "https://release-assets.githubusercontent.com/release.bin" }); await enable(); await check();
-  const url = (await getManifest()).assets[0].url;
-  expect(new Uint8Array(await (await request(url)).arrayBuffer())).toEqual(binary);
-  for (const target of ["http://169.254.169.254/credentials", "https://attacker.invalid/file", "https://user:pass@github.com/file", "https://github.com:444/file"]) {
-    remote.options.redirect = target;
-    expect(await (await request(url)).json()).toMatchObject({ code: "unsafe_release_redirect" });
-    expect(remote.observed.some(call => call.url === target)).toBe(false);
+it("rejects missing, malformed, oversized, redirecting and untrusted static manifests", async () => {
+  const source = bundle({ metadataStatus: 404 }); await setDOEnv();
+  expect(await (await check()).json()).toMatchObject({ code: "update_bundle_unavailable" });
+  source.options.metadataStatus = 302; expect((await check()).status).toBe(503);
+  source.options.metadataStatus = undefined;
+  for (const change of [{ version: "0.7.1-beta.1" }, { version: "1000000000.1.0" }, { version: "0.7.1", revision: "bad" }, { revision, extra: "x".repeat(65536) }, { extra: undefined, metadata: { schema: 1, files: [{ file: "../secret" }] } }]) {
+    Object.assign(source.options, change); expect((await check()).status).toBe(502);
   }
+  expect(source.observed.some(req => req.url.endsWith(".exe"))).toBe(false);
 });
 
-it("rejects mismatched lengths, encoded or partial upstreams, and short or overlong streams", async () => {
-  await setDOEnv(); const remote = github(); await enable(); await check();
-  const url = (await getManifest()).assets[0].url;
-  remote.options.length = binary.length + 1; expect((await request(url)).status).toBe(502);
-  remote.options.length = undefined; remote.options.encoding = "gzip"; expect((await request(url)).status).toBe(502);
-  remote.options.encoding = undefined; remote.options.binaryStatus = 206; expect((await request(url)).status).toBe(502);
-  remote.options.binaryStatus = undefined;
+it("rejects mismatched lengths, compression, redirects, partial and malformed binary streams", async () => {
+  const source = bundle(); await setDOEnv(); const url = (await manifest()).assets[0].url;
+  for (const change of [{ length: binary.length + 1 }, { length: undefined, encoding: "gzip" }, { encoding: undefined, binaryStatus: 302 }, { binaryStatus: 206 }]) {
+    Object.assign(source.options, change); expect((await request(url)).status).toBe(502);
+  }
+  source.options.binaryStatus = undefined;
   for (const size of [binary.length - 1, binary.length + 1]) {
-    remote.options.body = () => new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new Uint8Array(size)); controller.close(); } });
+    source.options.body = () => new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new Uint8Array(size)); controller.close(); } });
     await expect(request(url)).rejects.toThrow();
   }
 });
 
-it("cancels the upstream executable stream when the client stops reading", async () => {
-  await setDOEnv(); const remote = github(); await enable(); await check();
-  const url = (await getManifest()).assets[0].url;
-  let canceled!: () => void;
-  const cancellation = new Promise<void>(resolve => { canceled = resolve; });
-  remote.options.body = () => new ReadableStream<Uint8Array>({ pull(controller) { controller.enqueue(new Uint8Array(1)); }, cancel() { canceled(); } });
+it("cancels static binary reads when the client disconnects", async () => {
+  const source = bundle(); await setDOEnv(); const url = (await manifest()).assets[0].url;
+  let canceled!: () => void; const cancellation = new Promise<void>(resolve => { canceled = resolve; });
+  source.options.body = () => new ReadableStream<Uint8Array>({ pull(controller) { controller.enqueue(new Uint8Array(1)); }, cancel() { canceled(); } });
   const response = await worker.fetch(makeRequest(url), configured());
   const reader = response.body!.getReader(); await reader.read(); await reader.cancel(); await cancellation;
 });
 
-it("persists each device update policy and skips GitHub entirely in manual mode", async () => {
-  await setDOEnv(); const remote = github(), id = "a".repeat(32);
-  expect(await (await request("/v1/update/automatic")).json()).toMatchObject({enabled:false});
-  expect(remote.source).not.toHaveBeenCalled();
-  expect((await request(`/api/nodes/${id}`, "PATCH", {auto_update:true})).status).toBe(200);
-  await evictDurableObject(stub()); await setDOEnv();
-  const state = await (await request("/api/state?view=live")).json<any>();
-  expect(state.nodes.find((n:any) => n.node_id===id).auto_update).toBe(true);
-  expect(await (await request("/v1/update/automatic")).json()).toMatchObject({enabled:true,version:"0.4.0"});
-  expect(remote.source).toHaveBeenCalledTimes(2);
-  expect((await request(`/api/nodes/${id}`, "PATCH", {nickname:"should-not-save",auto_update:"true"})).status).toBe(400);
-  const unchanged = await (await request("/api/state?view=live")).json<any>();
-  expect(unchanged.nodes[0]).toMatchObject({auto_update:true,nickname:""});
-  await request(`/api/nodes/${id}`, "PATCH", {auto_update:false}); await expire();
-  expect(await (await request("/v1/update/automatic")).json()).toMatchObject({enabled:false});
-  expect(remote.source).toHaveBeenCalledTimes(2);
-  expect((await check()).status).toBe(200);
-  expect(remote.source).toHaveBeenCalledTimes(4);
+it("blocks raw asset paths, internal paths, panel aliases, unsafe settings, and unauthenticated Windows downloads", async () => {
+  const source = bundle(), monitor = vi.spyOn(env.MONITOR, "getByName").mockImplementation(() => { throw new Error("must not enter DO"); });
+  for (const path of ["/_downloads/current.json", "/panel/_downloads/current.json", "/panel/%5fdownloads/current.json", "/internal/install-authorize", "/internal/update-state", "/agent-releases/index.json"]) expect((await request(path)).status).toBe(404);
+  for (const path of ["../secret", "/absolute", "agent//stable", "Agent/Stable", "https://example.test", "api/files", "a".repeat(65)]) expect((await enable(path)).status).toBe(400);
+  expect((await worker.fetch(new Request("https://monitor.example.test/panel/downloads/" + setup), githubSettings())).status).toBe(401);
+  expect((await worker.fetch(new Request(origin + "/panel/api/updates/config", { method: "PUT", headers: { Origin: "https://evil.invalid" }, body: "{}" }), configured())).status).toBe(403);
+  expect(monitor).not.toHaveBeenCalled(); expect(source.assets).not.toHaveBeenCalled();
 });
 
-it("checks device platform/version without downloading and rejects removed device checks", async () => {
-  await setDOEnv(); const remote=github(), id="a".repeat(32);
-  await runInDurableObject(stub(),(_,ctx)=>ctx.storage.sql.exec("UPDATE nodes SET host=? WHERE node_id=?",JSON.stringify({os:"Windows",arch:"amd64",agent_version:"0.3.0"}),id));
-  expect(await (await request(`/api/nodes/${id}/update-check`,"POST")).json()).toEqual({version:"0.4.0",current_version:"0.3.0",available:true});
-  expect(remote.source).toHaveBeenCalledTimes(2);
-  await request(`/api/nodes/${id}`,"DELETE");
-  expect((await request(`/api/nodes/${id}/update-check`,"POST")).status).toBe(404);
-  expect(remote.source).toHaveBeenCalledTimes(2);
+it("serves the public script and authenticated Windows installer without waking the DO", async () => {
+  const source = bundle(), monitor = vi.spyOn(env.MONITOR, "getByName").mockImplementation(() => { throw new Error("must not enter DO"); });
+  expect(await (await request("/install.sh")).text()).toContain("#!/bin/sh");
+  expect((await request("/install.sh", "HEAD")).status).toBe(200);
+  expect(new Uint8Array(await (await request("/panel/downloads/" + setup)).arrayBuffer())).toEqual(binary);
+  expect((await request("/panel/downloads/../private")).status).toBe(404);
+  expect(monitor).not.toHaveBeenCalled(); expect(source.network).not.toHaveBeenCalled();
 });
 
-it("requires a registered credential for both cached manifests and executable GET/HEAD", async () => {
-  await setDOEnv(); const remote=github(); await check(); const manifest=await getManifest();
-  const paths=["/v1/update/check","/v1/update/automatic","/v1/updates/agent/stable/manifest.json",manifest.assets[0].url];
-  for(const path of paths) for(const method of ["GET","HEAD"]) {
-    const absent=await worker.fetch(new Request(path.startsWith("http")?path:origin+path,{method}),configured());
-    expect(absent.status).toBe(401); await absent.body?.cancel();
+it("serves a bounded public installer when ASSETS omits Content-Length, including HEAD", async () => {
+  const source = bundle({ scriptLength: null });
+  const monitor = vi.spyOn(env.MONITOR, "getByName").mockImplementation(() => { throw new Error("must not enter DO"); });
+  for (const method of ["GET", "HEAD"]) {
+    const response = await request("/install.sh", method);
+    expect(response.status).toBe(200); expect(response.headers.get("Content-Length")).toBe(String(installer.length));
+    expect(await response.text()).toBe(method === "HEAD" ? "" : new TextDecoder().decode(installer));
   }
-  await request(`/api/nodes/${"a".repeat(32)}`,"DELETE");
-  for(const path of paths) for(const method of ["GET","HEAD"]) expect((await request(path,method)).status).toBe(403);
-  expect(remote.source).toHaveBeenCalledTimes(2);
+  source.options.scriptBody = new Uint8Array(65537);
+  expect(await (await request("/install.sh")).json()).toMatchObject({ code: "installer_unavailable" });
+  source.options.scriptBody = new Uint8Array();
+  expect((await request("/install.sh")).status).toBe(503);
+  source.options.scriptBody = installer; source.options.scriptLength = installer.length + 1;
+  expect((await request("/install.sh")).status).toBe(503);
+  expect(monitor).not.toHaveBeenCalled(); expect(source.network).not.toHaveBeenCalled();
 });
 
-it("honors manual mode selected during a cold automatic check", async () => {
-  await setDOEnv(); const remote=github(), id="a".repeat(32);
-  await request(`/api/nodes/${id}`,"PATCH",{auto_update:true});
-  const result=await runInDurableObject(stub(),async instance=>{
-    let arrived!:()=>void, release!:()=>void;
-    const started=new Promise<void>(resolve=>{arrived=resolve;}), gate=new Promise<void>(resolve=>{release=resolve;});
-    remote.options.beforeAPI=async()=>{arrived();await gate;};
-    const headers={"X-Monitor-Role":"updates","X-Monitor-Auth-Expires":String(Date.now()+60000),"X-Monitor-Original-URL":origin+"/v1/update/automatic","X-Monitor-Original-Method":"GET","X-Monitor-Node-ID":id,Authorization:"Bearer "+"b".repeat(64)};
-    const pending=instance.fetch(new Request("http://do/internal/update-state",{method:"POST",headers}));
-    await started;
-    const changed=await instance.fetch(new Request(origin+`/api/nodes/${id}`,{method:"PATCH",headers:{"X-Monitor-Role":"admin","X-Monitor-Auth-Expires":String(Date.now()+60000)},body:JSON.stringify({auto_update:false})}));
-    expect(changed.status).toBe(200); release();
-    return (await pending).json();
-  });
-  expect(result).toMatchObject({config:{enabled:false}});
+it("allows installation downloads only while the particular invitation remains unconsumed", async () => {
+  const source = bundle(); await setDOEnv();
+  const created = await (await request("/api/invitations", "POST")).json<{ id: string; server: string }>();
+  const token = new URLSearchParams(new URL(created.server).hash.slice(1)).get("invite")!;
+  const base = "/bootstrap/install/" + encodeURIComponent(token);
+  expect(await (await request(base + "/current.json")).json()).toMatchObject({ version: "0.7.1", revision });
+  expect(new Uint8Array(await (await request(base + "/0.7.1/" + file)).arrayBuffer())).toEqual(binary);
+  expect((await request(base + "/0.7.0/" + file)).status).toBe(404);
+  expect((await request(base + "/0.7.1/secret.txt")).status).toBe(404);
+  await request("/api/invitations/" + created.id, "DELETE");
+  expect((await request(base + "/current.json")).status).toBe(403);
+  expect((await request(base + "/0.7.1/" + file, "HEAD")).status).toBe(403);
+  expect(source.network).not.toHaveBeenCalled();
+});
+
+it("rejects invalid or expired invitation download tokens before a DO lookup", async () => {
+  const source = bundle(), expired = await issueInvitation(env, node, Date.now() - 1);
+  const monitor = vi.spyOn(env.MONITOR, "getByName").mockImplementation(() => { throw new Error("must not enter DO"); });
+  for (const token of ["invalid", expired, node + "." + (Date.now() + 60000) + "." + "b".repeat(43) + "="]) {
+    expect((await request("/bootstrap/install/" + encodeURIComponent(token) + "/current.json")).status).toBe(403);
+  }
+  expect(monitor).not.toHaveBeenCalled(); expect(source.assets).not.toHaveBeenCalled();
+});
+
+it("checks a registered device platform and version using the bundled deployment", async () => {
+  bundle(); await setDOEnv();
+  await runInDurableObject(stub(), (_, ctx) => ctx.storage.sql.exec("UPDATE nodes SET host=? WHERE node_id=?", JSON.stringify({ os: "Windows", arch: "amd64", agent_version: "0.7.0" }), node));
+  expect(await (await request(`/api/nodes/${node}/update-check`, "POST")).json()).toMatchObject({ version: "0.7.1", revision, current_version: "0.7.0", available: true });
+  for (const [currentRevision, expected] of [[revision, false], ["e".repeat(40), true], [undefined, true]] as const) {
+    await runInDurableObject(stub(), (_, ctx) => ctx.storage.sql.exec("UPDATE nodes SET host=? WHERE node_id=?", JSON.stringify({ os: "Windows", arch: "amd64", agent_version: "0.7.1", agent_revision: currentRevision }), node));
+    expect(await (await request(`/api/nodes/${node}/update-check`, "POST")).json()).toMatchObject({ available: expected });
+  }
+  await request(`/api/nodes/${node}`, "DELETE");
+  expect((await request(`/api/nodes/${node}/update-check`, "POST")).status).toBe(404);
 });

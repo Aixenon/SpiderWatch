@@ -8,16 +8,26 @@ param(
     [switch]$AllowLocalHttp
 )
 $ErrorActionPreference = 'Stop'
-if ($Repository -like '__*') { throw 'Use the installer script attached to a GitHub Release, or specify -Repository OWNER/REPO -Version vX.Y.Z.' }
-if ($Version -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') { throw 'A stable vX.Y.Z release version is required.' }
+$taskWorkerBase = ''
+$taskProtocols = '=https'
+$taskRedirects = 3
 if ($Server -or $Join) {
     if (!$Server -or !$Join) { throw '-Server and -Join must be used together.' }
-    if ($Join -notmatch '^(?:[A-Za-z0-9]{16}|[0-9]{12})$') { throw 'Invalid network code.' }
+    if ($Join -notmatch '^(?:[A-Za-z0-9]{16}|[0-9]{12})\z') { throw 'Invalid network code.' }
     $taskServerUri = $null
     if (![Uri]::TryCreate($Server, [UriKind]::Absolute, [ref]$taskServerUri) -or
         ($taskServerUri.Scheme -ne 'https' -and !($AllowLocalHttp -and $taskServerUri.Scheme -eq 'http' -and $taskServerUri.IsLoopback))) {
         throw 'The server must use HTTPS (local HTTP requires -AllowLocalHttp).'
     }
+    if ($Server -match '[\x00-\x20\x7f]' -or $taskServerUri.UserInfo -or $taskServerUri.Query -or $taskServerUri.AbsolutePath -ne '/' -or
+        $taskServerUri.Fragment -cnotmatch '^#invite=[a-f0-9]{32}\.[0-9]{13}\.(?:[A-Za-z0-9]|%2[BbFf]){43}%3[Dd]\z') {
+        throw 'Use the complete invitation URL from the panel.'
+    }
+    # Preserve the original authority: Windows PowerShell expands IPv6 ::1
+    # when GetLeftPart is used, while the panel and client keep the short form.
+    $taskWorkerBase = $Server.Substring(0, $Server.IndexOf('#')).TrimEnd('/') + '/bootstrap/install/' + $taskServerUri.Fragment.Substring(8)
+    $taskRedirects = 0
+    if ($taskServerUri.Scheme -eq 'http') { $taskProtocols = '=http,https' }
     $taskIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
     try {
         $taskPrincipal = [Security.Principal.WindowsPrincipal]::new($taskIdentity)
@@ -25,6 +35,9 @@ if ($Server -or $Join) {
             throw 'Run this installation command in an Administrator PowerShell terminal.'
         }
     } finally { $taskIdentity.Dispose() }
+} else {
+    if ($Repository -like '__*') { throw 'Use the installer script attached to a GitHub Release, or specify -Repository OWNER/REPO -Version vX.Y.Z.' }
+    if ($Version -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') { throw 'A stable vX.Y.Z release version is required.' }
 }
 if (!$Architecture) {
     $taskMachine = $env:PROCESSOR_ARCHITEW6432
@@ -35,15 +48,23 @@ $taskTemp = Join-Path ([IO.Path]::GetTempPath()) ('spider-watch-' + [Guid]::NewG
 New-Item -ItemType Directory -Path $taskTemp | Out-Null
 $taskSetup = Join-Path $taskTemp 'setup.exe'
 $taskChecksums = Join-Path $taskTemp 'checksums.txt'
+$taskManifest = Join-Path $taskTemp 'current.json'
 $taskName = 'spider-watch-windows-' + $Architecture + '-setup.exe'
 $taskBase = 'https://github.com/' + $Repository + '/releases/download/' + $Version
 try {
-    & curl.exe --proto '=https' --proto-redir '=https' -fLsS --max-redirs 3 --max-filesize 16384 --connect-timeout 10 --max-time 120 ($taskBase+'/checksums.txt') -o $taskChecksums
+    if ($taskWorkerBase) {
+        & curl.exe --proto $taskProtocols --proto-redir $taskProtocols -fLsS --max-redirs $taskRedirects --max-filesize 65536 --connect-timeout 10 --max-time 120 ($taskWorkerBase+'/current.json') -o $taskManifest
+        if ($LASTEXITCODE) { throw 'Cannot read the deployed client version.' }
+        $taskCurrent = Get-Content -LiteralPath $taskManifest -Raw | ConvertFrom-Json
+        if ($taskCurrent.schema -ne 1 -or $taskCurrent.version -isnot [string] -or $taskCurrent.version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+\z') { throw 'Invalid deployed client version.' }
+        $taskBase = $taskWorkerBase + '/' + $taskCurrent.version
+    }
+    & curl.exe --proto $taskProtocols --proto-redir $taskProtocols -fLsS --max-redirs $taskRedirects --max-filesize 16384 --connect-timeout 10 --max-time 120 ($taskBase+'/checksums.txt') -o $taskChecksums
     if ($LASTEXITCODE) { throw 'Cannot download release checksums.' }
     $taskMatches = @(Get-Content -LiteralPath $taskChecksums | Where-Object { $_ -match ('^[a-f0-9]{64}  ' + [Regex]::Escape($taskName) + '$') })
     if ($taskMatches.Count -ne 1) { throw 'Missing or duplicate installer checksum.' }
     $taskHash = $taskMatches[0].Substring(0,64)
-    & curl.exe --proto '=https' --proto-redir '=https' -fLsS --max-redirs 3 --max-filesize 33554432 --connect-timeout 10 --max-time 180 ($taskBase+'/'+$taskName) -o $taskSetup
+    & curl.exe --proto $taskProtocols --proto-redir $taskProtocols -fLsS --max-redirs $taskRedirects --max-filesize 26214400 --connect-timeout 10 --max-time 180 ($taskBase+'/'+$taskName) -o $taskSetup
     if ($LASTEXITCODE -or (Get-FileHash -LiteralPath $taskSetup -Algorithm SHA256).Hash -ne $taskHash) { throw 'Installer download or checksum verification failed.' }
     $taskArguments = if ($Silent) { '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-' } else { '/NORESTART' }
     $taskProcess = Start-Process -FilePath $taskSetup -ArgumentList $taskArguments -Verb RunAs -WindowStyle Hidden -Wait -PassThru
@@ -64,6 +85,6 @@ try {
     }
 } finally {
     # Delete only the known files in the GUID directory created by this invocation.
-    foreach ($taskFile in @($taskSetup,$taskChecksums)) { if (Test-Path -LiteralPath $taskFile) { Remove-Item -LiteralPath $taskFile -Force } }
+    foreach ($taskFile in @($taskSetup,$taskChecksums,$taskManifest)) { if (Test-Path -LiteralPath $taskFile) { Remove-Item -LiteralPath $taskFile -Force } }
     Remove-Item -LiteralPath $taskTemp -Force
 }

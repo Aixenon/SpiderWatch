@@ -26,5 +26,3 @@ jobs:
       - run: npm run test:deploy
       - run: npm test
       - run: npm run build
-      - run: npm run deploy -- --dry-run
-        working-directory: .

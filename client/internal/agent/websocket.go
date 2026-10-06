@@ -91,6 +91,12 @@ func (c *Client) Live(ctx context.Context, collector *Collector, session string,
 		return errors.New("invalid agent version")
 	}
 	h.Set("X-Monitor-Agent-Version", host.Version)
+	if host.Revision != "" {
+		if !validBuildRevision(host.Revision) {
+			return errors.New("invalid agent build revision")
+		}
+		h.Set("X-Monitor-Agent-Revision", host.Revision)
+	}
 	if c.config.Access.ClientID != "" {
 		h.Set("CF-Access-Client-Id", c.config.Access.ClientID)
 		h.Set("CF-Access-Client-Secret", c.config.Access.ClientSecret)
@@ -201,6 +207,7 @@ func (c *Client) Live(ctx context.Context, collector *Collector, session string,
 				if !configured && control.Protocol == 2 {
 					protocol = 2
 					host.Version = ""
+					host.Revision = ""
 					_ = conn.SetWriteDeadline(time.Now().Add(time.Duration(c.config.Timeout) * time.Second))
 					if conn.WriteJSON(LiveHello{Type: "hello", Protocol: 2, Session: session, Host: host}) != nil {
 						return errors.New("WebSocket hello failed")

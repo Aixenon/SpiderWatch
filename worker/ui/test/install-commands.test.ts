@@ -4,24 +4,19 @@ import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { installCommands } from "../src/install-commands";
 
-const target = { server: "https://monitor.example.com/#invite=one-time-token", network: "abc123network", repository: "Example/SpiderWatch" };
+const target = { server: "https://monitor.example.com/#invite=one-time-token", network: "abc123network" };
 const windowsShell = [process.env.ProgramFiles, process.env["ProgramFiles(x86)"]]
   .filter((directory): directory is string => !!directory)
   .map(directory => join(directory, "Git", "usr", "bin", "sh.exe"))
   .find(path => existsSync(path));
 const shell = process.platform === "win32" ? windowsShell : "/bin/sh";
 
-// Every external operation is a shell function: these checks never download,
-// create an installer, invoke sudo, or run an installation on the test host.
-function run(command: string, options: { uid?: number; curlStatus?: number } = {}) {
+// No downloads, installation, or privilege changes run on the test host.
+function run(command: string) {
   if (!shell) throw new Error("A POSIX shell is required for command execution checks");
   const result = spawnSync(shell, ["-c", `
-mktemp() { printf '%s\\n' '/mock/installer'; }
-rm() { :; }
-curl() { printf 'curl:%s\\n' "$@" >&2; return ${options.curlStatus ?? 0}; }
-id() { printf '%s\\n' '${options.uid ?? 0}'; }
+curl() { printf 'curl:%s\\n' "$@" >&2; }
 sh() { printf '%s\\000' "$@"; }
-sudo() { printf '%s\\n' 'sudo-called' >&2; "$@"; }
 ${command}
 `], { encoding: "utf8", timeout: 5000 });
   if (result.error) throw result.error;
@@ -29,56 +24,51 @@ ${command}
 }
 
 describe("device installation commands", () => {
-  it("offers all Windows packages and the Unix command for the deployment's fork", () => {
-    const commands = installCommands({ ...target, repository: "AnotherOwner/monitor.fork_2" });
-    const base = "https://github.com/AnotherOwner/monitor.fork_2/releases/latest/download";
+  it("offers all Windows installers and install.sh on the panel's own Worker", () => {
+    const commands = installCommands(target);
+    const base = "https://monitor.example.com/panel/downloads";
     expect(commands.windows).toEqual([
       { label: "x64", url: `${base}/spider-watch-windows-amd64-setup.exe` },
       { label: "ARM64", url: `${base}/spider-watch-windows-arm64-setup.exe` },
       { label: "x86", url: `${base}/spider-watch-windows-386-setup.exe` },
     ]);
-    expect(commands.unix).toContain(`${base}/install.sh`);
+    expect(commands.unix).toContain("'https://monitor.example.com/install.sh' | sh -s --");
+    expect(commands.unix).not.toContain("github.com");
+    expect(commands.unix).not.toContain("\n");
   });
 
-  it.each([undefined, "", "../SpiderWatch", "Owner/../evil", "Owner/Repo/extra", "Owner/Repo?next=evil", "Owner/Repo#fragment", "https://github.com/Owner/Repo", "Owner/Repo\n", "Owner/Repo';echo injected"])(
-    "does not offer downloads for an absent or invalid repository: %s", repository => {
-      expect(installCommands({ ...target, repository })).toEqual({ windows: [] });
+  it("does not depend on a public GitHub repository", () => {
+    expect(installCommands({ ...target, repository: "Private/Repository" })).toEqual(installCommands(target));
+  });
+
+  it.each(["", "javascript:alert(1)", "//other.example", "http://monitor.example.com", "https://user:password@monitor.example.com"])(
+    "rejects an unsafe server: %s", server => {
+      expect(installCommands({ ...target, server })).toEqual({ windows: [] });
     },
   );
+
+  it("allows HTTP only when explicitly enabled on loopback", () => {
+    const local = { ...target, server: "http://127.0.0.1:8788/#invite=local" };
+    expect(installCommands(local)).toEqual({ windows: [] });
+    expect(installCommands(local, true).unix).toContain("'http://127.0.0.1:8788/install.sh'");
+    expect(installCommands(local, true).unix).toContain("--allow-local-http");
+    expect(installCommands({ ...target, server: "http://other.example/" }, true)).toEqual({ windows: [] });
+  });
 });
 
 describe.skipIf(!shell)("Unix command execution with mocked operations", () => {
   it("passes invitation values literally without evaluating shell punctuation", () => {
-    const server = "https://monitor.example.com/#invite='$(printf INJECTED)';\nexit 99;#";
+    const server = "https://monitor.example.com/#invite='$(printf INJECTED)';exit 99;#";
     const network = "network ' \" $HOME `printf INJECTED` ; #";
     const result = run(installCommands({ ...target, server, network }).unix!);
     expect(result.status).toBe(0);
-    expect(result.arguments).toEqual(["/mock/installer", "--server", server, "--join", network]);
-    expect(result.stderr).not.toContain("sudo-called");
+    expect(result.arguments).toEqual(["-s", "--", "--server", server, "--join", network]);
   });
 
-  it("elevates the installer for an unprivileged user and preserves the local HTTP flag", () => {
-    const result = run(installCommands(target, true).unix!, { uid: 1000 });
-    expect(result.status).toBe(0);
-    expect(result.stderr).toContain("sudo-called");
-    expect(result.arguments).toEqual(["/mock/installer", "--server", target.server, "--join", target.network, "--allow-local-http"]);
-  });
-
-  it("does not run even a partial installer if curl fails", () => {
-    const result = run(installCommands(target).unix!, { curlStatus: 22 });
-    expect(result.status).toBe(22);
-    expect(result.arguments).toEqual([]);
-    expect(result.stderr).not.toContain("sudo-called");
-  });
-
-  it("downloads only through HTTPS with HTTP errors, size and time bounded", () => {
+  it("downloads the canonical script without redirecting to another host and uses bounded timeouts", () => {
     const result = run(installCommands(target).unix!);
     expect(result.status).toBe(0);
-    const arguments_ = result.stderr.trim().split("\n").map(line => line.replace(/^curl:/, ""));
-    expect(arguments_).toContain("-fLsS");
-    expect(arguments_).toContain("https://github.com/Example/SpiderWatch/releases/latest/download/install.sh");
-    for (const [flag, value] of [["--proto", "=https"], ["--proto-redir", "=https"], ["--max-filesize", "65536"], ["--connect-timeout", "10"], ["--max-time", "120"]]) {
-      expect(arguments_[arguments_.indexOf(flag) + 1]).toBe(value);
-    }
+    const args = result.stderr.trim().split("\n").map(line => line.replace(/^curl:/, ""));
+    expect(args).toEqual(["-fsS", "--connect-timeout", "10", "--max-time", "120", "https://monitor.example.com/install.sh"]);
   });
 });

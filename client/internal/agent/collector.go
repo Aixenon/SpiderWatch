@@ -38,8 +38,8 @@ func NewCollector(c Config, version string) *Collector {
 	}
 	return &Collector{
 		config: c,
-		host: HostInfo{Hostname: hostname, OS: runtime.GOOS, Arch: runtime.GOARCH,
-			Kernel: kernelVersion(), CPUs: runtime.NumCPU(), CPUModel: sanitizeCPUModel(cpuModel()), PhysicalCPUs: physicalCPUs(), Version: version},
+		host: HostInfo{Hostname: hostname, OS: runtime.GOOS, Arch: releaseArch(),
+			Kernel: kernelVersion(), CPUs: runtime.NumCPU(), CPUModel: sanitizeCPUModel(cpuModel()), PhysicalCPUs: physicalCPUs(), Version: version, Revision: BuildRevision},
 	}
 }
 

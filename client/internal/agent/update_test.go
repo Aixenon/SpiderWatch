@@ -34,6 +34,17 @@ func TestUpdateNeverDowngradesOrInstallsPrereleases(t *testing.T) {
 	}
 }
 
+func TestCollectorReportsTheReleaseArchitectureForUpdateSelection(t *testing.T) {
+	previous := BuildArch
+	t.Cleanup(func() { BuildArch = previous })
+	for _, arch := range []string{"armv5", "armv7", "mipsle-softfloat", "riscv64"} {
+		BuildArch = arch
+		if NewCollector(Config{}, "0.7.1").Host().Arch != arch {
+			t.Fatalf("lost release architecture %s", arch)
+		}
+	}
+}
+
 func TestUpdateURLRejectsCredentialExfiltrationAndTraversal(t *testing.T) {
 	cfg, _ := NewConfig()
 	cfg.Server = "https://monitor.example.com"
@@ -67,6 +78,9 @@ func TestUpdateChecksWithoutDownloadingAndUsesTLSAccess(t *testing.T) {
 	var base string
 	client, config, _ := tlsTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
+		if r.Header.Get("X-Monitor-Update-Protocol") != "2" {
+			t.Error("update protocol negotiation missing")
+		}
 		if r.Header.Get("CF-Access-Client-Secret") != cfg.Access.ClientSecret || r.Header.Get("Authorization") != "Bearer "+cfg.DeviceKey || r.Header.Get("X-Monitor-Node-ID") != cfg.NodeID {
 			t.Error("missing update credentials")
 		}
@@ -91,6 +105,46 @@ func TestUpdateChecksWithoutDownloadingAndUsesTLSAccess(t *testing.T) {
 	plan, err = client.CheckUpdate(context.Background(), "0.4.0")
 	if err != nil || plan.Available || requests.Load() != 1 {
 		t.Fatalf("current release fetched extra metadata: %+v %v", plan, err)
+	}
+}
+
+func TestUpdateTracksDeployedRevisionWithoutRepeatedDownloads(t *testing.T) {
+	previous := BuildRevision
+	BuildRevision = strings.Repeat("a", 40)
+	t.Cleanup(func() { BuildRevision = previous })
+	for _, row := range []struct {
+		name, version, revision, manifestRevision string
+		available, invalid                        bool
+	}{
+		{"same-build", "0.7.1", BuildRevision, BuildRevision, false, false},
+		{"new-commit", "0.7.1", strings.Repeat("b", 40), strings.Repeat("b", 40), true, false},
+		{"older-version", "0.7.0", strings.Repeat("b", 40), strings.Repeat("b", 40), false, false},
+		{"deployment-changed-between-requests", "0.7.1", strings.Repeat("b", 40), strings.Repeat("c", 40), false, true},
+		{"invalid-revision", "0.7.1", "bad", "bad", false, true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			var requests atomic.Int32
+			var origin string
+			client, cfg, _ := tlsTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				if r.URL.Path == "/v1/update/check" {
+					_ = json.NewEncoder(w).Encode(UpdateCheck{Enabled: true, Version: row.version, Revision: row.revision, ReleaseTag: "v" + row.version, ManifestURL: origin + "/v1/updates/agent/stable/manifest.json"})
+					return
+				}
+				asset := UpdateAsset{OS: runtime.GOOS, Arch: releaseArch(), File: assetFilename(runtime.GOOS, releaseArch()), Bytes: 1024, SHA256: strings.Repeat("d", 64)}
+				asset.URL = origin + "/v1/updates/agent/stable/" + row.version + "/" + asset.SHA256 + "/" + asset.File
+				_ = json.NewEncoder(w).Encode(UpdateManifest{Schema: 1, Version: row.version, Revision: row.manifestRevision, ReleaseTag: "v" + row.version, Assets: []UpdateAsset{asset}})
+			}))
+			defer client.Close()
+			origin = cfg.Server
+			plan, err := client.CheckUpdate(context.Background(), "0.7.1")
+			if plan.Available != row.available || (err != nil) != row.invalid {
+				t.Fatalf("unexpected plan: %+v, error: %v", plan, err)
+			}
+			if (row.name == "same-build" || row.name == "older-version") && requests.Load() != 1 {
+				t.Fatal("unchanged or older deployment fetched unnecessary metadata")
+			}
+		})
 	}
 }
 

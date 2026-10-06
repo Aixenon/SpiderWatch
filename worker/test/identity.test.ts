@@ -178,6 +178,7 @@ it("authenticates update checks too, without querying GitHub for pending, unknow
   expect((await consume(await signed(device,"/v1/update/check"))).status).toBe(403);
   const renewed=await invite();
   expect(await (await consume(await enrollment(device,renewed))).json()).toMatchObject({state:"approved"});
+  await runInDurableObject(stub(),(_,ctx)=>ctx.storage.sql.exec("INSERT INTO config(id,value) VALUES (5,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value",JSON.stringify({enabled:false,distribution_path:"agent/stable",aliases:[]})));
   expect(await (await consume(await signed(device,"/v1/update/check"))).json()).toMatchObject({enabled:false});
   await admin(`/api/nodes/${device.id}`,"DELETE");
   expect((await consume(await signed(device,"/v1/update/check"))).status).toBe(403);

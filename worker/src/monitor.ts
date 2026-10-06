@@ -13,13 +13,12 @@ import {
   type Device, type Host, type Metrics, type NetworkIdentity, type Settings,
 } from "./model";
 import { addCounts, countKeys, emptyCounts, forecast, hourOf, splitSpan, sumUsage, type Counts, type HourUsage } from "./usage";
-import { emptyUpdateCache, fetchLatestUpdate, sameUpdateRelease, updateRepository,
-  UPDATE_CACHE_MS, UpdateSourceError, type UpdateCache, type UpdateConfig, type UpdateState } from "./update-source";
+import { emptyUpdateCache, readBundledRelease, updateRepository, UpdateSourceError, type UpdateCache, type UpdateConfig, type UpdateState } from "./update-source";
 
 type Attachment = {
   role: "agent" | "viewer"; id?: string; authExpires: number; expires?: number; closed?: boolean; closedAt?: number;
   interval?: number; version?: number; session?: string; sequence?: number; lastReport?: number; savedAt?: number;
-  agentVersion?: string; host?: Host; protocol?: 2;
+  agentVersion?: string; agentRevision?: string; host?: Host; protocol?: 2;
   epoch: number; hour: number; pending: Counts; exposureAt: number;
 };
 type Runtime = { created: number; checkpoint: number; epoch: number; viewCursor: number; viewing: boolean; viewExpires: number };
@@ -36,7 +35,6 @@ export class MonitorGroup extends DurableObject<Env> {
   private closed = new Set<WebSocket>();
   private scheduledAlarm: number | null = null;
   private invitationDeadline: number | null = null;
-  private updateCheckInFlight: Promise<UpdateCache> | null = null;
   private historyWindow: HistoryWindow | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -335,50 +333,30 @@ export class MonitorGroup extends DurableObject<Env> {
   }
 
   private readUpdateState(): UpdateState {
-    const rows = new Map(this.query<{id:number;value:string}>("SELECT id,value FROM config WHERE id IN (5,6)").map(row => [row.id, row.value]));
-    const config: UpdateConfig = rows.has(5) ? JSON.parse(rows.get(5)!) : { enabled: true, distribution_path: "agent/stable", aliases: [] };
-    const repository = updateRepository(this.env);
-    const stored: UpdateCache | null = rows.has(6) ? JSON.parse(rows.get(6)!) : null;
-    return { config, source: stored?.repository === repository ? stored : emptyUpdateCache(repository) };
+    const row = this.query<{value:string}>("SELECT value FROM config WHERE id=5")[0];
+    const config: UpdateConfig = row ? JSON.parse(row.value) : { enabled: true, distribution_path: "agent/stable", aliases: [] };
+    return { config, source: emptyUpdateCache(updateRepository(this.env)) };
   }
   private async checkUpdateSource(source: UpdateCache): Promise<UpdateCache> {
-    if (this.updateCheckInFlight) return this.updateCheckInFlight;
-    if (source.error && source.retry_at > Date.now()) return source;
-    if (!source.error && source.current && Date.now() - source.checked_at < UPDATE_CACHE_MS) return source;
-    const pending = (async () => {
-      let next: UpdateCache;
-      try {
-        const release = await fetchLatestUpdate(source.repository);
-        if (source.current) {
-          const before = source.current.version.split(".").map(Number), after = release.version.split(".").map(Number);
-          const firstDifference = before.findIndex((part, index) => part !== after[index]);
-          if (firstDifference >= 0 && after[firstDifference] < before[firstDifference]) throw new UpdateSourceError("release_version_regressed");
-        }
-        // Published versions must not silently change their executable hashes.
-        if (source.current?.version === release.version && !sameUpdateRelease(source.current, release)) throw new UpdateSourceError("release_changed");
-        const now = Date.now();
-        next = { repository: source.repository, current: release,
-          previous: source.current && !sameUpdateRelease(source.current, release) ? source.current : source.previous,
-          checked_at: now, last_attempt_at: now, retry_at: 0, error: null };
-      } catch (error) {
-        const failure = error instanceof UpdateSourceError ? error : new UpdateSourceError("github_unavailable");
-        const now = Date.now();
-        next = { ...source, last_attempt_at: now, retry_at: now + failure.retryMs, error: failure.code };
-      }
-      this.query("INSERT INTO config (id,value) VALUES (6,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value", JSON.stringify(next));
-      return next;
-    })();
-    this.updateCheckInFlight = pending;
-    try { return await pending; } finally { if (this.updateCheckInFlight === pending) this.updateCheckInFlight = null; }
+    // Static metadata belongs to this deployment. No SQL cache, polling of
+    // GitHub, persisted failure state, or stale URLs across Worker deployments.
+    try {
+      const { version, revision, release_tag, assets, repository } = await readBundledRelease(this.env);
+      const now = Date.now();
+      return { repository, current: { version, revision, release_tag, assets }, previous: null,
+        checked_at: now, last_attempt_at: now, retry_at: 0, error: null };
+    } catch (error) {
+      const failure = error instanceof UpdateSourceError ? error : new UpdateSourceError("update_bundle_unavailable", 503);
+      return { ...source, error: failure.code, retry_at: Date.now() + failure.retryMs };
+    }
   }
   private async updateState(request: Request): Promise<Response> {
     if (!["GET", "POST"].includes(request.method)) return json({ code: "method_not_allowed" }, 405);
     let state = this.readUpdateState();
-    if (request.method === "POST" && state.config.enabled && state.source.repository) {
+    if (state.config.enabled) {
       const source = await this.checkUpdateSource(state.source);
-      // A manager can disable distribution while the upstream call is pending.
       state = { ...this.readUpdateState(), source };
-      if (state.config.enabled && source.error) return json({ code: source.error, retry_after_seconds: Math.max(1, Math.ceil((source.retry_at - Date.now()) / 1000)) }, source.error === "github_rate_limited" ? 503 : 502);
+      if (state.config.enabled && source.error) return json({ code: source.error }, source.error === "update_bundle_unavailable" ? 503 : 502);
     }
     return json(state);
   }
@@ -393,6 +371,12 @@ export class MonitorGroup extends DurableObject<Env> {
     if (!upgrade) this.counter().http_requests++;
     this.duration.begin(started);
     try {
+      if (request.headers.get("X-Monitor-Role") === "install") {
+        if (url.hostname !== "do" || url.pathname !== "/internal/install-authorize" || request.method !== "GET") return json({code:"not_found"},404);
+        const id = request.headers.get("X-Monitor-Invitation-ID") || "";
+        if (!/^[a-f0-9]{32}$/.test(id) || !this.query("SELECT id FROM invitations WHERE id=? AND expires_at>? AND node_id IS NULL", id, Date.now()).length) return json({code:"registration_closed"},403);
+        return json({ authorized: true });
+      }
       if (request.headers.get("X-Monitor-Role") === "updates") {
         if (url.hostname !== "do") return json({code:"not_found"},404);
         const original = request.headers.get("X-Monitor-Original-URL");
@@ -409,8 +393,8 @@ export class MonitorGroup extends DurableObject<Env> {
         if (url.pathname === "/internal/update-state") {
           const response = await this.updateState(request);
           // A cold source check yields to other requests. Honor revocation or
-          // a policy change made while GitHub was responding.
-          if (original && request.method === "POST") {
+          // a policy change made while static metadata was loading.
+          if (original) {
             const current = this.query<Device>("SELECT * FROM nodes WHERE node_id=?",request.headers.get("X-Monitor-Node-ID"))[0];
             if (!current || current.state !== "approved") {
               await response.body?.cancel();
@@ -451,12 +435,14 @@ export class MonitorGroup extends DurableObject<Env> {
         if (device.state !== "approved") return json({ state: device.state, code: device.state }, 403);
         const agentVersion = request.headers.get("X-Monitor-Agent-Version") || undefined;
         if (agentVersion && !/^[A-Za-z0-9._+-]{1,64}$/.test(agentVersion)) return json({ code: "invalid_agent_version" }, 400);
+        const agentRevision = request.headers.get("X-Monitor-Agent-Revision") || undefined;
+        if (agentRevision && !/^[a-f0-9]{40}$/.test(agentRevision)) return json({ code: "invalid_agent_revision" }, 400);
         for (const old of this.sockets("agent")) if (this.attachment(old)?.id === device.node_id) {
           const previous = this.attachment(old)!; previous.closed = true; previous.closedAt = Date.now(); old.serializeAttachment(previous);
           this.send(old, {type: "superseded"}); old.close(4001, "superseded"); this.flushUsage(Date.now(), old);
         }
         const pair = new WebSocketPair(), a = this.newAttachment("agent", authExpires, device.node_id);
-        a.agentVersion = agentVersion;
+        a.agentVersion = agentVersion; a.agentRevision = agentRevision;
         // Keep the historical checkpoint across reconnects. A reconnect must
         // not multiply the selected historical recording rate.
         a.savedAt = device.last_seen || undefined;
@@ -713,11 +699,10 @@ export class MonitorGroup extends DurableObject<Env> {
       let node = this.query<Device>("SELECT * FROM nodes WHERE node_id=? AND state='approved'", updateMatch[1])[0];
       if (!node) return json({code:"node_not_found"},404);
       const state = this.readUpdateState();
-      if (!state.source.repository) return json({code:"update_repository_not_configured"},503);
       if (!state.config.enabled) return json({code:"updates_disabled"},409);
       try {
         const source = await this.checkUpdateSource(state.source);
-        // Never disclose a result for a device deleted while GitHub was loading.
+        // Never disclose a result for a device deleted while static metadata was loading.
         node = this.query<Device>("SELECT * FROM nodes WHERE node_id=? AND state='approved'", updateMatch[1])[0];
         if (!node) return json({code:"node_not_found"},404);
         if (!this.readUpdateState().config.enabled) return json({code:"updates_disabled"},409);
@@ -730,9 +715,9 @@ export class MonitorGroup extends DurableObject<Env> {
         if (before) {
           newer = false;
           for (let i=0;i<3;i++) if (after[i] !== Number(before[i+1])) { newer = after[i] > Number(before[i+1]); break; }
-          if (after.every((value,index)=>value===Number(before[index+1])) && before[4]) newer = true;
+          if (after.every((value,index)=>value===Number(before[index+1])) && (before[4] || host.agent_revision !== source.current!.revision)) newer = true;
         }
-        return json({version:source.current!.version,current_version:current,available:newer});
+        return json({version:source.current!.version,revision:source.current!.revision,current_version:current,available:newer});
       } catch(error) {
         if (error instanceof UpdateSourceError) return json({code:error.code},error.status);
         throw error;
@@ -871,11 +856,12 @@ export class MonitorGroup extends DurableObject<Env> {
       } else {
         if (body && typeof body === "object" && (body as {type?: string}).type === "hello") {
           const hello = body as {protocol?: number; session?: string; host?: Record<string, unknown>};
-          const host = hello.host && { ...hello.host, agent_version: a.agentVersion };
+          const host = hello.host && { ...hello.host, agent_version: a.agentVersion, agent_revision: a.agentRevision };
           if (a.protocol || hello.protocol !== 2 || !a.agentVersion || typeof hello.session !== "string" || !/^[a-f0-9]{32}$/.test(hello.session) || !validHost(host)) { ws.close(1008, "invalid hello"); return; }
           // Store only bounded host fields: arbitrary client keys must not
           // grow the hibernation attachment or consume database storage.
           a.host = { hostname: host.hostname, os: host.os, arch: host.arch, cpus: host.cpus, agent_version: a.agentVersion };
+          if (a.agentRevision) a.host.agent_revision = a.agentRevision;
           if (host.physical_cpus !== undefined) a.host.physical_cpus = host.physical_cpus;
           if (host.cpu_model !== undefined) a.host.cpu_model = host.cpu_model;
           if (typeof host.kernel === "string" && host.kernel.length <= 128) a.host.kernel = host.kernel;

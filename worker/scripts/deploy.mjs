@@ -3,6 +3,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
+import { packageClientAssets, verifyClientRelease } from './client-assets.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const wrangler = resolve(root, 'node_modules/wrangler/bin/wrangler.js');
@@ -122,7 +123,7 @@ function wranglerJSON(args) {
   }
 }
 
-export async function main(args = process.argv.slice(2), env = process.env) {
+export async function main(args = process.argv.slice(2), env = process.env, { assetsDirectory } = {}) {
   if (args.some(arg => arg !== '--dry-run')) throw new Error('Usage: npm run deploy [-- --dry-run]');
   const dry = args.includes('--dry-run');
   const source = JSON.parse(await readFile(resolve(root, 'wrangler.jsonc'), 'utf8'));
@@ -135,6 +136,19 @@ export async function main(args = process.argv.slice(2), env = process.env) {
     }).trim();
   } catch {}
   const repository = identifyRepository(env, remote);
+  let revision = env.GITHUB_SHA;
+  if (!revision) {
+    try {
+      revision = execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim();
+    } catch {}
+  }
+  if (!/^[a-f0-9]{40}$/.test(revision || '')) throw new Error('Cannot identify the source commit. Deploy from a Git checkout.');
+  // Refuse incomplete checkouts before contacting Cloudflare or touching a live deployment.
+  const releaseDirectory = resolve(env.SPIDER_RELEASE_DIR || resolve(root, '../client/dist'));
+  const releaseOptions = { repository, revision };
+  const release = await verifyClientRelease(releaseDirectory, releaseOptions);
   let account;
   let state = { exists: false, hasInvitation: false, hasSession: false, workersDev: false, previews: false };
   if (!dry) {
@@ -151,6 +165,9 @@ export async function main(args = process.argv.slice(2), env = process.env) {
   const panelBundle = spawnSync(process.execPath, [resolve(root, 'ui/node_modules/vite/bin/vite.js'), 'build'], { cwd: resolve(root, 'ui'), stdio: 'inherit', env });
   if (panelBundle.error || panelBundle.status !== 0) throw new Error('Panel build failed.');
   const config = deploymentConfig(source, { name, repository, account });
+  if (assetsDirectory) config.assets.directory = resolve(assetsDirectory);
+  const packaged = await packageClientAssets(releaseDirectory, config.assets.directory, releaseOptions);
+  if (packaged.build !== release.build) throw new Error('Client artifacts changed during deployment; rebuild before retrying.');
   const invitation = invitationFor(state, env.INVITATION_SECRET);
   const session = sessionFor(state, env.SESSION_SECRET);
   const tempRoot = resolve(root, '.tmp');
@@ -166,7 +183,7 @@ export async function main(args = process.argv.slice(2), env = process.env) {
       command.push('--secrets-file', secretFile);
     }
     if (dry) command.push('--dry-run', '--outdir', resolve(root, 'dist'));
-    console.log(`SpiderWatch: ${repository} → ${name}`);
+    console.log(`SpiderWatch: ${repository} → ${name}; ${release.version} (${release.revision.slice(0, 12)}), ${release.files.length} client files`);
     const result = spawnSync(process.execPath, command, { cwd: root, stdio: 'inherit', env });
     if (result.error || result.status !== 0) throw new Error('Cloudflare deployment failed.');
     console.log(dry ? 'Deployment package verified; nothing uploaded.'

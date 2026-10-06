@@ -1,5 +1,5 @@
 import { json } from "./model";
-import { fetchUpdateSource, readUpdateJSON, updateAssetURL, updateRepository, validUpdatePath,
+import { readUpdateJSON, streamBundledFile, updateRepository, validUpdatePath,
   UpdateSourceError, type UpdateConfig, type UpdateRelease, type UpdateState } from "./update-source";
 
 export function isUpdatePath(path: string): boolean {
@@ -31,17 +31,17 @@ async function updateState(request: Request, env: Env, refresh: boolean): Promis
 function manifestURL(origin: string, path: string): string { return `${origin}/v1/updates/${path}/manifest.json`; }
 function publicConfig({ config, source }: UpdateState, env: Env, origin: string) {
   return { enabled: config.enabled, distribution_path: config.distribution_path, github_repository: updateRepository(env),
-    version: source.current?.version || null, release_tag: source.current?.release_tag || null,
+    version: source.current?.version || null, revision: source.current?.revision || null, release_tag: source.current?.release_tag || null,
     last_checked_at: source.checked_at || null, last_synced_at: source.checked_at || null,
     retry_after_seconds: Math.max(0, Math.ceil((source.retry_at - Date.now()) / 1000)), source_error: source.error,
     ready: !!source.current, manifest_url: source.current ? manifestURL(origin, config.distribution_path) : null };
 }
-function publicManifest(release: UpdateRelease, origin: string, path: string) {
-  return { schema: 1, version: release.version, release_tag: release.release_tag,
+function publicManifest(release: UpdateRelease, origin: string, path: string, revision: boolean) {
+  return { schema: 1, version: release.version, ...(revision ? { revision: release.revision } : {}), release_tag: release.release_tag,
     assets: release.assets.map(asset => ({ ...asset, url: `${origin}/v1/updates/${path}/${release.version}/${asset.sha256}/${asset.file}` })) };
 }
 
-/** Access and admin Origin are checked by index.ts before entering this handler. */
+/** Panel session and admin Origin are checked by index.ts before this handler. */
 export async function handleUpdates(request: Request, env: Env): Promise<Response> {
   try {
     const url = new URL(request.url), path = url.pathname;
@@ -53,19 +53,20 @@ export async function handleUpdates(request: Request, env: Env): Promise<Respons
       try { input = await readUpdateJSON(request, 2048) as Partial<UpdateConfig> | null; }
       catch (error) { return json({ code: "invalid_update_config" }, error instanceof UpdateSourceError && error.code === "update_metadata_too_large" ? 413 : 400); }
       if (!input || typeof input.enabled !== "boolean" || !validUpdatePath(input.distribution_path)) return json({ code: "invalid_update_config" }, 400);
-      if (input.enabled && !updateRepository(env)) return json({ code: "update_repository_not_configured" }, 503);
       const response = await internal(request, env, "update-config", "PUT", { enabled: input.enabled, distribution_path: input.distribution_path });
       if (!response.ok) return response;
       await response.body?.cancel();
       return json(publicConfig(await updateState(request, env, false), env, url.origin));
     }
     const deviceCheck = path === "/v1/update/check" || path === "/v1/update/automatic";
+    // Older clients reject unknown JSON fields, so revision is opt-in.
+    const revision = request.headers.get("X-Monitor-Update-Protocol") === "2";
     const state = await updateState(request, env, deviceCheck || path === "/api/updates/check");
     const { config, source } = state;
     if (path === "/api/updates/config" || path === "/api/updates/check") return json(publicConfig(state, env, url.origin));
     if (deviceCheck && (!config.enabled || !source.repository)) return json({ enabled: false, version: null, release_tag: null, manifest_url: null });
     if (deviceCheck) return json({ enabled: config.enabled && !!source.current && !!source.repository,
-      version: source.current?.version || null, release_tag: source.current?.release_tag || null,
+      version: source.current?.version || null, ...(revision ? { revision: source.current?.revision || null } : {}), release_tag: source.current?.release_tag || null,
       manifest_url: config.enabled && source.current && source.repository ? manifestURL(url.origin, config.distribution_path) : null });
     if (!config.enabled || !source.repository) return json({ code: "updates_disabled" }, 404);
     if (!source.current) return json({ code: "update_check_required" }, 409);
@@ -73,26 +74,14 @@ export async function handleUpdates(request: Request, env: Env): Promise<Respons
     const selectedPath = [config.distribution_path, ...config.aliases].sort((a, b) => b.length - a.length).find(candidate => path.startsWith(prefix + candidate + "/"));
     if (!selectedPath) return json({ code: "update_not_found" }, 404);
     const suffix = path.slice(prefix.length + selectedPath.length + 1);
-    if (suffix === "manifest.json") return request.method === "HEAD" ? new Response(null, { headers: { "Cache-Control": "no-store" } }) : json(publicManifest(source.current, url.origin, selectedPath));
+    if (suffix === "manifest.json") return request.method === "HEAD" ? new Response(null, { headers: { "Cache-Control": "no-store" } }) : json(publicManifest(source.current, url.origin, selectedPath, revision));
     const pieces = suffix.split("/");
     if (pieces.length !== 3) return json({ code: "update_not_found" }, 404);
     const [version, hash, file] = pieces;
     const release = [source.current, source.previous].find(value => value?.version === version && value.assets.some(asset => asset.sha256 === hash && asset.file === file));
     const asset = release?.assets.find(value => value.sha256 === hash && value.file === file);
     if (!release || !asset) return json({ code: "update_not_found" }, 404);
-    if (request.method === "HEAD") return new Response(null, { headers: { "Content-Type": "application/octet-stream", "Content-Length": String(asset.bytes), "Cache-Control": "no-store" } });
-    const response = await fetchUpdateSource(updateAssetURL(source.repository, release, file), true, AbortSignal.timeout(120_000));
-    const length = response.headers.get("Content-Length");
-    const encoding = response.headers.get("Content-Encoding");
-    if (response.status !== 200 || (encoding && encoding !== "identity") || !response.body || (length !== null && Number(length) !== asset.bytes)) { await response.body?.cancel(); throw new UpdateSourceError("asset_size_mismatch"); }
-    // Native stream preserves backpressure/cancellation and rejects both short
-    // and overlong bodies. The Agent hashes streamed bytes before replacement.
-    const body = response.body.pipeThrough(new FixedLengthStream(asset.bytes));
-    return new Response(body, { headers: {
-      "Content-Type": "application/octet-stream", "Content-Length": String(asset.bytes),
-      "Content-Disposition": `attachment; filename="${asset.file}"`, ETag: `"${asset.sha256}"`,
-      "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
-    } });
+    return await streamBundledFile(env, release.version, asset, request.method);
   } catch (error) {
     if (error instanceof UpdateSourceError) {
       const response = json({ code: error.code, retry_after_seconds: Math.ceil(error.retryMs / 1000) }, error.status);

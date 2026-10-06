@@ -20,14 +20,14 @@ async function enroll(approve=true) {
   await request("/bootstrap/enroll","POST",{protocol:1,node_id:id,device_key:key,group:env.MONITOR_GROUP,host});
   if(!approve)await runInDurableObject(stub(),(_,ctx)=>ctx.storage.sql.exec("UPDATE nodes SET state='pending' WHERE node_id=?",id));
 }
-async function socket() {
-  const r=await request("/v1/live","GET",undefined,{...headers,Upgrade:"websocket","X-Monitor-Agent-Version":"0.4.0"});expect(r.status).toBe(101);
+async function socket(revision?: string) {
+  const r=await request("/v1/live","GET",undefined,{...headers,Upgrade:"websocket","X-Monitor-Agent-Version":"0.4.0",...(revision ? {"X-Monitor-Agent-Revision":revision} : {})});expect(r.status).toBe(101);
   const ws=r.webSocket!;clients.add(ws);ws.accept();expect(await receive(ws,"config")).toMatchObject({protocol:2,compression:"gzip"});return ws;
 }
 afterEach(async()=>{for(const ws of clients){try{ws.close(1000);}catch{}}clients.clear();await reset();});
 
 it("remembers handshake version and hello host across hibernation, with compact gzip metrics",async()=>{
-  await enroll();const ws=await socket();const helloAck=receive(ws,"hello_ack");
+  await enroll();const ws=await socket("c".repeat(40));const helloAck=receive(ws,"hello_ack");
   const {agent_version:_,...helloHost}=host;
   ws.send(JSON.stringify({type:"hello",protocol:2,session:"9".repeat(32),host:helloHost}));await helloAck;
   await evictDurableObject(stub());
@@ -39,15 +39,17 @@ it("remembers handshake version and hello host across hibernation, with compact 
   const compressed=await new Response(new ReadableStream({start(c){c.enqueue(bytes);c.close();}}).pipeThrough(new CompressionStream("gzip"))).arrayBuffer();
   const ack=receive(ws,"ack");ws.send(compressed);expect(await ack).toMatchObject({sequence:1});
   const state=await (await request("/api/state?view=live")).json() as any;
-  expect(state.nodes[0]).toMatchObject({host:{...host,agent_version:"0.4.0"},metrics});
+  expect(state.nodes[0]).toMatchObject({host:{...host,agent_version:"0.4.0",agent_revision:"c".repeat(40)},metrics});
   expect(state).not.toHaveProperty("usage");expect(state).not.toHaveProperty("forecast");
   await evictDurableObject(stub());
   expect((await (await request("/api/state?view=live")).json() as any).nodes[0].host.agent_version).toBe("0.4.0");
   expect((await (await request("/api/state?view=live")).json() as any).nodes[0].host.cpu_model).toBe(host.cpu_model);
+  expect((await (await request("/api/state?view=live")).json() as any).nodes[0].host.agent_revision).toBe("c".repeat(40));
 });
 
 it("requires hello before accepting compact metrics and bounds the version header",async()=>{
   await enroll();expect((await request("/v1/live","GET",undefined,{...headers,Upgrade:"websocket","X-Monitor-Agent-Version":"x".repeat(65)})).status).toBe(400);
+  expect((await request("/v1/live","GET",undefined,{...headers,Upgrade:"websocket","X-Monitor-Agent-Version":"0.4.0","X-Monitor-Agent-Revision":"x".repeat(40)})).status).toBe(400);
   const ws=await socket();const closed=new Promise<CloseEvent>(resolve=>ws.addEventListener("close",resolve,{once:true}));
   ws.send(JSON.stringify({type:"metrics",sequence:1,metrics:{time:new Date().toISOString()}}));expect((await closed).code).toBe(1008);
   expect(await runInDurableObject(stub(),(_,ctx)=>ctx.storage.sql.exec("SELECT count(*) AS n FROM history_batches").one().n)).toBe(0);

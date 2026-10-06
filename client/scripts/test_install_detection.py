@@ -6,7 +6,13 @@ import subprocess
 import unittest
 
 SCRIPT = Path(__file__).with_name('install.sh').resolve()
-SHELL = shutil.which('sh') or os.environ.get('SPIDER_TEST_SHELL')
+SHELL = os.environ.get('SPIDER_TEST_SHELL') or shutil.which('sh')
+SHELL_ENV = dict(os.environ)
+if os.name == 'nt' and SHELL:
+    shell_directory = Path(SHELL).resolve().parent
+    tool_directories = [shell_directory, shell_directory.parent / 'usr' / 'bin']
+    SHELL_ENV['PATH'] = os.pathsep.join([str(path) for path in tool_directories if path.is_dir()]
+                                      + [SHELL_ENV.get('PATH', '')])
 
 @unittest.skipUnless(SHELL,'requires a POSIX shell')
 class InstallerDetectionTests(unittest.TestCase):
@@ -20,7 +26,7 @@ script=$1
 set -- --detect
 . "$script"
 '''
-        env={**os.environ,'TEST_OS':system,'TEST_MACHINE':machine,'TEST_BITS':str(bits),
+        env={**SHELL_ENV,'TEST_OS':system,'TEST_MACHINE':machine,'TEST_BITS':str(bits),
              'TEST_ENDIAN':str(endian),'TEST_FEATURES':features}
         return subprocess.run([SHELL,'-c',probes,'installer-test',str(SCRIPT).replace('\\','/')],env=env,text=True,capture_output=True)
     def test_cpu_abi_detection(self):

@@ -5,8 +5,8 @@ export const DAY_SECONDS = 86400;
 // to one object, so its usable Free storage ceiling is 1 GB, not the 5 GB
 // account aggregate. Values use decimal GB, as Cloudflare does.
 export const FREE_LIMITS = { worker_requests: 100000, do_requests: 100000, do_gb_seconds: 13000, sql_read: 5000000, sql_written: 100000, storage_bytes: 1_000_000_000, account_storage_bytes: 5_000_000_000 };
-export const UPDATE_DISTRIBUTION_LIMITS = { file_bytes: 16 * 1024 * 1024, metadata_cache_seconds: 300, failure_cache_seconds: 60, github_unauthenticated_requests_per_hour: 60 };
-export const UPDATE_USAGE_NOTE = "更新包由 GitHub Actions 发布到固定仓库的 Releases，设备或管理员手动检查时按需获取。每次检查或下载产生 Workers 请求及 DO 小配置查询；版本信息缓存 5 分钟，失败至少缓存 1 分钟，二进制由 Worker 从 GitHub 流式转发、不经过 DO。更新开销不按监控采样频率计算，GitHub 未认证 REST 另有每来源 IP 每小时 60 次限制。";
+export const UPDATE_DISTRIBUTION_LIMITS = { file_bytes: 16 * 1024 * 1024, static_asset_bytes: 25 * 1024 * 1024 };
+export const UPDATE_USAGE_NOTE = "安装包与面板一起部署到 Workers 静态资源。检查更新和受保护的下载经过 Worker，DO 只校验设备权限和读取配置，二进制直接从静态资源流式返回；不写入 DO，不在运行时请求 GitHub。更新开销与监控采样频率无关。";
 export const PRICING_AS_OF = "2026-10-06";
 export type Counts = { fast_messages: number; idle_messages: number; other_messages: number; connections: number; viewer_connections: number; http_requests: number; alarms: number; sql_read: number; sql_written: number; handler_ms: number; device_seconds: number; view_seconds: number };
 export type HourUsage = Counts & { hour: number };
@@ -85,7 +85,7 @@ export function forecast(settings: Settings, devices: number, rows: HourUsage[],
     do_gb_seconds_conservative: 0.128 * DAY_SECONDS,
     duration_basis: "application_estimate_not_bill",
     quota_scope: "network_usage_account_shared_limits",
-    update_distribution: { source: "github_releases_on_demand", cost_basis: "manual_operations_not_sample_rate", limits: UPDATE_DISTRIBUTION_LIMITS, note: UPDATE_USAGE_NOTE },
+    update_distribution: { source: "worker_static_assets", cost_basis: "manual_operations_not_sample_rate", limits: UPDATE_DISTRIBUTION_LIMITS, note: UPDATE_USAGE_NOTE },
     storage_bytes: storageBytes,
     limits: FREE_LIMITS, pricing_as_of: PRICING_AS_OF,
   };

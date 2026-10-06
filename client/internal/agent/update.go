@@ -19,9 +19,14 @@ import (
 
 const MaxUpdateManifestBytes = 64 << 10
 
+// BuildRevision identifies the source commit bundled with the Worker.
+// It is injected at build time and requires no extra file or background task.
+var BuildRevision string
+
 type UpdateCheck struct {
 	Enabled     bool   `json:"enabled"`
 	Version     string `json:"version"`
+	Revision    string `json:"revision,omitempty"`
 	ReleaseTag  string `json:"release_tag"`
 	ManifestURL string `json:"manifest_url"`
 }
@@ -36,6 +41,7 @@ type UpdateAsset struct {
 type UpdateManifest struct {
 	Schema     int           `json:"schema"`
 	Version    string        `json:"version"`
+	Revision   string        `json:"revision,omitempty"`
 	ReleaseTag string        `json:"release_tag"`
 	Assets     []UpdateAsset `json:"assets"`
 }
@@ -105,6 +111,7 @@ func (c *Client) updateRequest(ctx context.Context, endpoint string, timeout tim
 	req.Header.Set("Accept", "application/json, application/octet-stream")
 	req.Header.Set("Accept-Encoding", "identity")
 	req.Header.Set("User-Agent", "spider-watch/update")
+	req.Header.Set("X-Monitor-Update-Protocol", "2")
 	if c.config.Access.ClientID != "" {
 		req.Header.Set("CF-Access-Client-Id", c.config.Access.ClientID)
 		req.Header.Set("CF-Access-Client-Secret", c.config.Access.ClientSecret)
@@ -145,7 +152,7 @@ func (c *Client) CheckUpdate(ctx context.Context, current string) (UpdatePlan, e
 	return c.checkUpdate(ctx, current, false)
 }
 
-// Automatic checks use the server's per-device policy before any GitHub lookup.
+// Automatic checks use the server's per-device policy before reading its bundle.
 func (c *Client) CheckAutomaticUpdate(ctx context.Context, current string) (UpdatePlan, error) {
 	return c.checkUpdate(ctx, current, true)
 }
@@ -169,6 +176,14 @@ func (c *Client) checkUpdate(ctx context.Context, current string, automatic bool
 		return plan, err
 	}
 	plan.Version = check.Version
+	if check.Revision != "" && !validBuildRevision(check.Revision) {
+		return plan, errors.New("invalid update build revision")
+	}
+	// A deployment may rebuild the same release version from a newer commit.
+	// The trusted Worker selects that commit; numeric version downgrades stay blocked.
+	if !newer && current == check.Version && check.Revision != "" && check.Revision != BuildRevision {
+		newer = true
+	}
 	if !newer {
 		return plan, nil
 	}
@@ -180,7 +195,7 @@ func (c *Client) checkUpdate(ctx context.Context, current string, automatic bool
 	if err = c.updateJSON(ctx, u.String(), &manifest); err != nil {
 		return plan, err
 	}
-	if manifest.Schema != 1 || manifest.Version != check.Version || manifest.ReleaseTag != check.ReleaseTag || len(manifest.Assets) < 1 || len(manifest.Assets) > 32 {
+	if manifest.Schema != 1 || manifest.Version != check.Version || manifest.Revision != check.Revision || manifest.ReleaseTag != check.ReleaseTag || len(manifest.Assets) < 1 || len(manifest.Assets) > 32 {
 		return plan, errors.New("update manifest does not match advertised release")
 	}
 	seen := make(map[string]bool, len(manifest.Assets))
@@ -206,6 +221,18 @@ func (c *Client) checkUpdate(ctx context.Context, current string, automatic bool
 	}
 	plan.Available = true
 	return plan, nil
+}
+
+func validBuildRevision(value string) bool {
+	if len(value) != 40 {
+		return false
+	}
+	for _, c := range value {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // DownloadUpdate streams at most the declared size into a caller-owned temporary

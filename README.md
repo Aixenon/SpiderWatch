@@ -6,27 +6,25 @@ Cloudflare Workers + SQLite Durable Objects 网络监控面板，配套单文件
 
 ## 部署到 Cloudflare
 
-需要一个 Cloudflare 账户、托管在该账户下的域名和包含本项目完整源码的 GitHub 仓库。通过 Cloudflare Workers Builds 连接仓库即可部署；面板使用 GitHub 登录，无需开通 Zero Trust。默认使用自定义域名，关闭 `workers.dev` 和预览地址。
+需要一个 Cloudflare 账户、托管在该账户下的域名和包含本项目完整源码的 GitHub 仓库。GitHub Actions 编译客户端后，将面板、Worker 和全部平台安装文件一起部署。面板使用 GitHub 登录，无需开通 Zero Trust。默认使用自定义域名，关闭 `workers.dev` 和预览地址。
 
-源码仓库可以私有保存；现有客户端安装与自动更新依赖可访问的公开 GitHub Releases。
+源码仓库可以保持私有。首次安装和设备更新均从自己的 Worker 下载，无需公开 GitHub Release，也不使用 R2。
 
-### 1. 连接仓库并部署
+### 1. 配置自动部署
 
-在 Cloudflare 控制台进入 **Workers & Pages → Create application → Import a repository**，授权 GitHub 并选择已有仓库。使用以下构建配置：
+在 Cloudflare 创建使用 **Edit Cloudflare Workers** 模板的 API Token，权限范围只选择用于部署的账户。在 GitHub 仓库的 **Settings → Secrets and variables → Actions** 配置：
 
-| 配置 | 值 |
-|---|---|
-| Worker 名称 | `spider-watch` |
-| Root directory | `/`（默认仓库根目录） |
-| Build command | 留空 |
-| Deploy command | `npm run deploy` |
-| Preview command | `npm run preview` |
+| 位置 | 名称 | 内容 |
+|---|---|---|
+| Secrets | `CLOUDFLARE_API_TOKEN` | 上述部署 Token |
+| Variables | `CLOUDFLARE_ACCOUNT_ID` | Cloudflare 账户 ID |
+| Variables | `WORKER_NAME` | Worker 名称，默认 `spider-watch`；迁移已有面板时填写原名称 |
 
-关闭 **Enable Preview Builds**，生产分支选择 `main`。当前配置用于正式部署，分支预览需要独立设置登录和资源绑定。
+Token 只保存在 GitHub Secret 中，不写入源码。仓库名和源码提交会在编译时自动识别，Fork 后无需修改下载地址。已使用 Cloudflare Workers Builds 的项目，请在原 Worker 的构建设置中断开自动构建连接，避免两条发布流程同时运行。
 
-点击 **Save and Deploy**。Cloudflare 一起发布前端、Worker 和 SQLite Durable Object；部署脚本自动补齐注册邀请密钥和独立的会话签名密钥，后续部署保留已有密钥。
+打开仓库 **Actions → SpiderWatch builds → Run workflow**，选择默认分支运行；之后推送到默认分支会自动触发。19 个平台二进制、3 个 Windows 安装包与脚本全部生成并校验成功后，才部署同一提交的面板、Worker 和静态文件。任何编译或校验失败都不发布。Pull Request 和其他分支只编译，不部署生产环境。
 
-已经把 Root directory 填为 `worker` 的项目也可继续使用相同命令。如果日志提示找不到 `/opt/buildhome/repo/package.json`，请部署仓库最新提交；根目录现已提供安装与部署入口。
+部署脚本自动创建 SQLite Durable Object 绑定，并补齐注册邀请密钥和会话签名密钥；后续部署保留已有密钥与设置。
 
 首次部署完成后，在 Worker 的 **Settings → Domains & Routes → Add → Custom Domain** 绑定面板域名，例如 `monitor.example.com`，再继续设置登录。登录配置未完成时，页面只显示配置提示，不能取得管理权限。
 
@@ -56,9 +54,9 @@ Cloudflare Workers + SQLite Durable Objects 网络监控面板，配套单文件
 
 打开面板，点击 **使用 GitHub 登录**，通过 GitHub 官方授权页返回后进入总览。按下节安装客户端，然后在 **管理 → 添加设备** 中复制注册指令，到目标设备执行即可加入网络。
 
-后续推送代码到连接的分支，Cloudflare 会自动重新部署。保持 Worker 名称 `spider-watch` 和 `MONITOR_GROUP` 不变，设备身份与设置会保留。部署面板不会自动创建客户端 Release；需要发布客户端时，按下一节操作。
+保持 Worker 名称和 `MONITOR_GROUP` 不变，设备身份与设置会保留。每次默认分支发布都会同步全部客户端静态文件，创建 GitHub Release 是可选的归档步骤。
 
-本地部署备选（Node.js 22 或更新版本）：
+本地部署备选（Node.js 22 或更新版本）：先将本次 **SpiderWatch builds** 的 `spider-watch-release` 产物解压到 `client/dist`，再执行：
 
 ```sh
 cd worker
@@ -67,13 +65,13 @@ npx wrangler login
 npm run deploy
 ```
 
-本地部署使用同一流程，自动识别首次或已有部署；域名和 GitHub 登录配置仍在 Cloudflare 控制台管理。
+本地部署使用同一流程；缺少平台、文件校验失败或产物不属于当前提交时会拒绝发布，避免清空已上线的安装文件。多账户环境需指定 `CLOUDFLARE_ACCOUNT_ID`，已有非默认名称的 Worker 需指定 `WORKER_NAME`。域名和 GitHub 登录配置仍在 Cloudflare 控制台管理。
 
 ## 发布与安装客户端
 
-推送稳定版本标签，例如 `v0.7.0`。**SpiderWatch builds** 生成各平台客户端、Windows 安装包及 SHA-256 清单，并发布 Release。失败时保留草稿，可重跑；已发布的版本不覆盖，需要新标签。用于安装和自动更新的 Release 必须公开可访问。
+普通提交自动编译并同步到 Worker，无需先创建 Release。客户端版本维护在 `client/VERSION`；构建同时记录源码提交，设备可识别同一版本号下的新构建，已运行相同构建时不会重复下载。
 
-普通提交、Pull Request 和手动运行也会编译，但只产生 Actions 下载产物，不发布稳定更新。
+如需正式 GitHub Release，推送与 `client/VERSION` 一致的稳定标签，例如 `v0.7.1`。发布失败时保留草稿，可重跑；已发布版本不覆盖，需要新标签。私有仓库的 Release 仍然私有，不影响 Worker 安装和更新。
 
 ### 平台
 
@@ -89,9 +87,13 @@ Windows 要求 Windows 10 / Server 2016 或更新版本；macOS 要求 macOS 13 
 
 ### 安装
 
-在面板 **管理 → 添加设备** 中同时提供 Windows 安装包下载和 Linux/macOS 安装命令。地址使用部署时识别的客户端发布仓库，指向最新稳定 Release；仓库需要公开可访问，并已发布安装附件。
+在面板 **管理 → 添加设备** 中同时提供 Windows 安装包下载和 Linux/macOS 安装命令，地址均使用当前面板域名。脚本入口为 `https://你的面板域名/install.sh`，弹窗自动附带本次邀请和网络代码：
 
-- **Windows**：下载对应架构的 `spider-watch-windows-架构-setup.exe`，运行安装向导。默认安装到 `C:\Program Files\SpiderWatch`，注册开机服务和更新任务，添加命令到 PATH。安装后新开管理员终端。也可使用 Release 提供的 `curl.exe` + PowerShell 命令。
+```sh
+curl -fsS --connect-timeout 10 --max-time 120 'https://monitor.example.com/install.sh' | sh -s -- --server '面板提供的完整邀请地址' --join 网络代码
+```
+
+- **Windows**：登录面板后下载对应架构的 `spider-watch-windows-架构-setup.exe`，运行安装向导。默认安装到 `C:\Program Files\SpiderWatch`，注册开机服务和更新任务，添加命令到 PATH。安装后新开管理员终端执行加入指令。
 - **Linux / macOS**：复制弹窗中的 `curl` 命令，下载脚本后自动安装并使用本次邀请加入。非 root 用户会通过 sudo 安装。同一个脚本识别系统和架构，并适配 systemd、OpenRC、procd 或 launchd。程序位于 `/opt/spider-watch/spider-watch`，命令链接位于 `/usr/local/bin/spider-watch`。需要 curl、CA 证书和 SHA-256 校验工具。
 - **手动运行**：直接下载对应的单个二进制。Unix 安装脚本可加 `--no-service --prefix "$HOME/.local/bin"`；也可用 `--arch` 指定清单中的架构。没有支持的服务管理器时，脚本会说明原因，不假装完成开机启动。
 
@@ -107,7 +109,7 @@ spider-watch configure --server "面板提供的完整邀请地址" --join 网�
 
 设备配置中可设置名称、分组、图标和自动更新。自动更新由系统每 6 小时检查一次；手动可执行 `spider-watch --update`，Unix 使用 sudo，Windows 使用管理员终端。检查但不安装：`spider-watch update --check`。OpenRC/procd 的自动更新需要正在运行的 cron 服务。
 
-更新仅允许已注册设备从自己的 Worker 下载；Worker 从当前固定仓库的稳定 GitHub Release 按需读取，客户端校验版本、大小和 SHA-256 后替换。首次安装从公开 Release 获取，后续设备更新不依赖公开安装入口。没有额外常驻更新进程。
+安装脚本公开可读，首次安装的文件下载需有效且未使用的邀请，成功加入后邀请立即关闭。Windows 面板下载需有效登录；后续更新仅允许已注册设备使用签名请求。所有安装和更新文件来自本次部署的 Worker 静态资源，客户端校验版本、大小和 SHA-256 后替换。文件流不经过 DO 存储，也不在下载时请求 GitHub；鉴权请求仍会消耗 Worker 和相应的 DO 调用。没有额外常驻更新进程。
 
 Windows 可在 **设置 → 应用 → SpiderWatch → 卸载** 移除程序、服务和更新任务。卸载保留 `%ProgramData%\spider-watch\state` 中的设备身份，以便重装复用；永久撤销设备请同时在面板删除。Unix 身份位于 `/var/lib/spider-watch/state`。
 
@@ -125,4 +127,4 @@ Windows 可在 **设置 → 应用 → SpiderWatch → 卸载** 移除程序、�
 
 macOS 的物理归属及 APFS 容器容量最多缓存 5 分钟，每卷数据仍随正常采样更新。
 
-参考：[GitHub OAuth 应用](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/creating-an-oauth-app)、[GitHub 登录流程](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps)、[Workers 构建配置](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/)、[部署时上传 Secret](https://developers.cloudflare.com/workers/configuration/secrets/)。
+参考：[GitHub OAuth 应用](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/creating-an-oauth-app)、[GitHub 登录流程](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps)、[GitHub Actions 部署 Worker](https://developers.cloudflare.com/workers/ci-cd/external-cicd/github-actions/)、[部署时上传 Secret](https://developers.cloudflare.com/workers/configuration/secrets/)。

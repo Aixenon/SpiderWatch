@@ -18,10 +18,16 @@ import (
 )
 
 func TestLiveV2SendsVersionOnceAndWaitsForHelloAcknowledgement(t *testing.T) {
+	previous := BuildRevision
+	BuildRevision = strings.Repeat("b", 40)
+	t.Cleanup(func() { BuildRevision = previous })
 	var reports atomic.Int32
 	client, config, _ := tlsTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-Monitor-Agent-Version") != "0.4.0" {
 			t.Error("version missing from handshake")
+		}
+		if r.Header.Get("X-Monitor-Agent-Revision") != BuildRevision {
+			t.Error("build revision missing from handshake")
 		}
 		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
 		if err != nil {
@@ -39,7 +45,7 @@ func TestLiveV2SendsVersionOnceAndWaitsForHelloAcknowledgement(t *testing.T) {
 		}
 		var host map[string]any
 		_ = json.Unmarshal(hello["host"], &host)
-		if string(hello["type"]) != `"hello"` || string(hello["protocol"]) != "2" || len(hello["session"]) != 34 || host["hostname"] == nil || host["agent_version"] != nil {
+		if string(hello["type"]) != `"hello"` || string(hello["protocol"]) != "2" || len(hello["session"]) != 34 || host["hostname"] == nil || host["agent_version"] != nil || host["agent_revision"] != nil {
 			t.Error("hello repeats version or lacks stable host metadata")
 		}
 		// A zero ack must not make --once exit before its first real report.
@@ -67,7 +73,7 @@ func TestLiveV2SendsVersionOnceAndWaitsForHelloAcknowledgement(t *testing.T) {
 		if json.Unmarshal(data, &payload) != nil || len(payload) != 3 || string(payload["type"]) != `"metrics"` || string(payload["sequence"]) != "1" || payload["metrics"] == nil {
 			t.Errorf("noncompact metrics: %s", data)
 		}
-		for _, field := range []string{"host", "node_id", "agent_version", "session", "protocol"} {
+		for _, field := range []string{"host", "node_id", "agent_version", "agent_revision", "session", "protocol"} {
 			if payload[field] != nil {
 				t.Errorf("repeated metadata %s", field)
 			}
