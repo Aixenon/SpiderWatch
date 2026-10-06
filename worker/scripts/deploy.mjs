@@ -59,7 +59,7 @@ export async function readDeployment(account, name, credential, request = fetch)
     return body.result;
   }
   const secrets = await get('secrets', true);
-  if (secrets === null) return { exists: false, hasInvitation: false, workersDev: true, previews: false };
+  if (secrets === null) return { exists: false, hasInvitation: false, hasSession: false, workersDev: true, previews: false };
   if (!Array.isArray(secrets) || secrets.some(secret => typeof secret?.name !== 'string')) {
     throw new Error('Invalid Worker secrets response; deployment stopped.');
   }
@@ -69,6 +69,7 @@ export async function readDeployment(account, name, credential, request = fetch)
   }
   return {
     exists: true, hasInvitation: secrets.some(secret => secret.name === 'INVITATION_SECRET'),
+    hasSession: secrets.some(secret => secret.name === 'SESSION_SECRET'),
     workersDev: subdomain.enabled, previews: subdomain.previews_enabled,
   };
 }
@@ -82,6 +83,13 @@ export function invitationFor(state, supplied) {
   return value;
 }
 
+export function sessionFor(state, supplied) {
+  if (state.hasSession) return undefined;
+  const value = supplied || randomBytes(32).toString('hex');
+  if (typeof value !== 'string' || !/^[a-f0-9]{64}$/i.test(value)) throw new Error('SESSION_SECRET must contain 64 random hexadecimal characters.');
+  return value;
+}
+
 export function deploymentConfig(source, { name, repository, state, account }) {
   const config = structuredClone(source);
   delete config.env;
@@ -89,7 +97,7 @@ export function deploymentConfig(source, { name, repository, state, account }) {
   delete config.routes;
   delete config.route;
   delete config.account_id;
-  for (const key of ['ACCESS_TEAM_DOMAIN', 'ACCESS_PANEL_AUD', 'ACCESS_AGENT_AUD', 'ADMIN_EMAILS']) {
+  for (const key of ['GITHUB_CLIENT_ID', 'GITHUB_CLIENT_SECRET', 'ADMIN_GITHUB_IDS', 'SESSION_SECRET', 'ACCESS_TEAM_DOMAIN', 'ACCESS_PANEL_AUD', 'ACCESS_AGENT_AUD', 'ADMIN_EMAILS']) {
     delete config.vars[key];
   }
   Object.assign(config, {
@@ -127,7 +135,7 @@ export async function main(args = process.argv.slice(2), env = process.env) {
   } catch {}
   const repository = identifyRepository(env, remote);
   let account;
-  let state = { exists: false, hasInvitation: false, workersDev: true, previews: false };
+  let state = { exists: false, hasInvitation: false, hasSession: false, workersDev: true, previews: false };
   if (!dry) {
     const configured = env.CLOUDFLARE_ACCOUNT_ID || source.account_id;
     account = selectAccount(configured, configured ? undefined : wranglerJSON(['whoami']));
@@ -138,6 +146,7 @@ export async function main(args = process.argv.slice(2), env = process.env) {
   }
   const config = deploymentConfig(source, { name, repository, state, account });
   const invitation = invitationFor(state, env.INVITATION_SECRET);
+  const session = sessionFor(state, env.SESSION_SECRET);
   const tempRoot = resolve(root, '.tmp');
   await mkdir(tempRoot, { recursive: true, mode: 0o700 });
   const temp = await mkdtemp(resolve(tempRoot, 'deploy-'));
@@ -145,9 +154,9 @@ export async function main(args = process.argv.slice(2), env = process.env) {
     const configFile = resolve(temp, 'wrangler.json');
     await writeFile(configFile, JSON.stringify(config, null, 2), { mode: 0o600 });
     const command = [wrangler, 'deploy', '--config', configFile, '--keep-vars'];
-    if (invitation) {
+    if (invitation || session) {
       const secretFile = resolve(temp, 'secrets.json');
-      await writeFile(secretFile, JSON.stringify({ INVITATION_SECRET: invitation }), { mode: 0o600 });
+      await writeFile(secretFile, JSON.stringify({ ...(invitation ? { INVITATION_SECRET: invitation } : {}), ...(session ? { SESSION_SECRET: session } : {}) }), { mode: 0o600 });
       command.push('--secrets-file', secretFile);
     }
     if (dry) command.push('--dry-run', '--outdir', resolve(root, 'dist'));
@@ -155,7 +164,7 @@ export async function main(args = process.argv.slice(2), env = process.env) {
     const result = spawnSync(process.execPath, command, { cwd: root, stdio: 'inherit', env });
     if (result.error || result.status !== 0) throw new Error('Cloudflare deployment failed.');
     console.log(dry ? 'Deployment package verified; nothing uploaded.'
-      : 'Deployed. Configure the domain and Access in Cloudflare, then open your panel.');
+      : 'Deployed. Configure GitHub login in Cloudflare, then open your panel.');
   } finally {
     // Only the unique directory created by this invocation is removed.
     await rm(temp, { recursive: true, force: true });

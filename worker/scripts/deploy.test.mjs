@@ -5,13 +5,13 @@ import { existsSync, readFileSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { deploymentConfig, identifyRepository, invitationFor, main, readDeployment, selectAccount } from './deploy.mjs';
+import { deploymentConfig, identifyRepository, invitationFor, sessionFor, main, readDeployment, selectAccount } from './deploy.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const account = 'a'.repeat(32);
 const credential = { type: 'api_token', token: 'fixture-api-token' };
-const newState = { exists: false, hasInvitation: false, workersDev: true, previews: false };
-const existingState = { exists: true, hasInvitation: true, workersDev: false, previews: false };
+const newState = { exists: false, hasInvitation: false, hasSession: false, workersDev: true, previews: false };
+const existingState = { exists: true, hasInvitation: true, hasSession: true, workersDev: false, previews: false };
 const success = result => Response.json({ success: true, result });
 
 beforeEach(() => {
@@ -74,7 +74,7 @@ test('reads existing secret names and preserves both domain switches without ret
         ? success([{ name: 'OTHER_SECRET', type: 'secret_text' }, { name: 'INVITATION_SECRET', type: 'secret_text' }])
         : success({ enabled: workersDev, previews_enabled: previews });
     });
-    assert.deepEqual(state, { exists: true, hasInvitation: true, workersDev, previews });
+    assert.deepEqual(state, { exists: true, hasInvitation: true, hasSession: false, workersDev, previews });
     assert.equal(calls.length, 2);
     assert.ok(calls[1].endsWith('/subdomain'));
     assert.equal(invitationFor(state, 'a replacement must not overwrite the existing secret'), undefined);
@@ -128,12 +128,12 @@ test('keeps dashboard-managed settings out of the upload and preserves durable b
   source.routes = [{ pattern: 'old.example.test', custom_domain: true }];
   source.route = 'old.example.test/*';
   source.account_id = 'b'.repeat(32);
-  Object.assign(source.vars, { ACCESS_TEAM_DOMAIN: 'old.cloudflareaccess.com', ACCESS_PANEL_AUD: 'old-aud', ACCESS_AGENT_AUD: 'old-agent-aud', ADMIN_EMAILS: 'old@example.test' });
+  Object.assign(source.vars, { GITHUB_CLIENT_ID: 'old-app', GITHUB_CLIENT_SECRET: 'old-secret', ADMIN_GITHUB_IDS: '12345', SESSION_SECRET: 'a'.repeat(64), ACCESS_TEAM_DOMAIN: 'old.cloudflareaccess.com', ACCESS_PANEL_AUD: 'old-aud', ACCESS_AGENT_AUD: 'old-agent-aud', ADMIN_EMAILS: 'old@example.test' });
   const original = structuredClone(source);
   const config = deploymentConfig(source, { name: 'spider-watch', repository: 'fork/SpiderWatch', state: existingState, account });
   assert.deepEqual(source, original);
   for (const key of ['env', 'routes', 'route']) assert.equal(Object.hasOwn(config, key), false);
-  for (const key of ['ACCESS_TEAM_DOMAIN', 'ACCESS_PANEL_AUD', 'ACCESS_AGENT_AUD', 'ADMIN_EMAILS']) assert.equal(Object.hasOwn(config.vars, key), false);
+  for (const key of ['GITHUB_CLIENT_ID', 'GITHUB_CLIENT_SECRET', 'ADMIN_GITHUB_IDS', 'SESSION_SECRET', 'ACCESS_TEAM_DOMAIN', 'ACCESS_PANEL_AUD', 'ACCESS_AGENT_AUD', 'ADMIN_EMAILS']) assert.equal(Object.hasOwn(config.vars, key), false);
   assert.equal(config.keep_vars, true);
   assert.equal(config.workers_dev, false);
   assert.equal(config.preview_urls, false);
@@ -149,7 +149,7 @@ test('keeps dashboard-managed settings out of the upload and preserves durable b
   assert.ok(isAbsolute(config.main) && isAbsolute(config.assets.directory));
 });
 
-function fakeDeployment({ secrets = [{ name: 'INVITATION_SECRET' }], status = 0, error, authError = false, apiStatus = 200 } = {}) {
+function fakeDeployment({ secrets = [{ name: 'INVITATION_SECRET' }, { name: 'SESSION_SECRET' }], status = 0, error, authError = false, apiStatus = 200 } = {}) {
   const calls = [], uploads = [], logs = [];
   mock.method(console, 'log', value => logs.push(String(value)));
   mock.method(childProcess, 'execFileSync', (command, args) => {
@@ -192,12 +192,12 @@ test('redeployment keeps existing credentials and removes only its temporary dep
   assert.ok(fixture.logs.every(line => !line.includes(credential.token)));
 });
 
-test('uploads only a new invitation secret when an existing Worker has none', async () => {
+test('uploads independent invitation and session secrets only when absent', async () => {
   const fixture = fakeDeployment({ secrets: [{ name: 'UNRELATED_SECRET' }] });
   await main([], { GITHUB_REPOSITORY: 'fixture/SpiderWatch', CLOUDFLARE_ACCOUNT_ID: account, CLOUDFLARE_API_TOKEN: credential.token });
   assert.equal(fixture.calls.length, 1); // Only the checkout lookup; credentials are already supplied.
   const upload = fixture.uploads[0];
-  assert.deepEqual(Object.keys(upload.secrets), ['INVITATION_SECRET']);
+  assert.deepEqual(Object.keys(upload.secrets), ['INVITATION_SECRET', 'SESSION_SECRET']);
   assert.match(upload.secrets.INVITATION_SECRET, /^[a-f0-9]{64}$/);
   assert.equal(existsSync(upload.directory), false);
   assert.ok(fixture.logs.every(line => !line.includes(upload.secrets.INVITATION_SECRET)));
@@ -208,6 +208,22 @@ test('cleans temporary credentials after Wrangler fails', async () => {
   await assert.rejects(main([], { GITHUB_REPOSITORY: 'fixture/SpiderWatch' }), /Cloudflare deployment failed/);
   assert.match(fixture.uploads[0].secrets.INVITATION_SECRET, /^[a-f0-9]{64}$/);
   assert.equal(existsSync(fixture.uploads[0].directory), false);
+});
+
+test('upgrading an existing deployment adds only the missing session secret', async () => {
+  const fixture = fakeDeployment({ secrets: [{ name: 'INVITATION_SECRET' }, { name: 'GITHUB_CLIENT_SECRET' }] });
+  await main([], { GITHUB_REPOSITORY: 'fixture/SpiderWatch' });
+  assert.deepEqual(Object.keys(fixture.uploads[0].secrets), ['SESSION_SECRET']);
+  assert.match(fixture.uploads[0].secrets.SESSION_SECRET, /^[a-f0-9]{64}$/);
+  assert.ok(fixture.logs.every(line => !line.includes(fixture.uploads[0].secrets.SESSION_SECRET)));
+});
+
+test('generates independent session keys and never overwrites an existing session secret', () => {
+  const first = sessionFor(newState), second = sessionFor(newState);
+  assert.match(first, /^[a-f0-9]{64}$/); assert.notEqual(first, second);
+  assert.equal(sessionFor(newState, 'f'.repeat(64)), 'f'.repeat(64));
+  for (const invalid of ['short', 'z'.repeat(64), 'a'.repeat(64) + '\n', 123]) assert.throws(() => sessionFor(newState, invalid), /SESSION_SECRET/);
+  assert.equal(sessionFor(existingState, 'do-not-replace'), undefined);
 });
 
 test('credential and metadata failures stop before deployment and do not print credential command output', async () => {

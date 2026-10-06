@@ -388,7 +388,7 @@ export class MonitorGroup extends DurableObject<Env> {
     const writesBefore = this.counter().sql_written;
     const admin = request.headers.get("X-Monitor-Role") === "admin";
     const authExpires = Number(request.headers.get("X-Monitor-Auth-Expires"));
-    if (!Number.isFinite(authExpires) || authExpires <= started) return json({ code: "access_expired" }, 401);
+    if (!Number.isFinite(authExpires) || authExpires <= started) return json({ code: "session_expired" }, 401);
     const upgrade = request.headers.get("Upgrade")?.toLowerCase() === "websocket";
     if (!upgrade) this.counter().http_requests++;
     this.duration.begin(started);
@@ -843,7 +843,7 @@ export class MonitorGroup extends DurableObject<Env> {
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
     const started = Date.now(), a = this.attachment(ws); if (!a || a.closed) { ws.close(1008, "invalid connection"); return; }
-    if (a.authExpires <= started) { this.send(ws, {type: "access_expired"}); ws.close(1008, "Access expired"); return; }
+    if (a.authExpires <= started) { this.send(ws, {type: "session_expired"}); ws.close(1008, "Session expired"); return; }
     if (a.epoch !== this.runtime.epoch) { a.epoch = this.runtime.epoch; a.pending = emptyCounts(); }
     if (a.hour !== hourOf(started)) { this.flushUsage(started); Object.assign(a, this.attachment(ws)); a.hour = hourOf(started); }
     a.pending.other_messages++;
@@ -967,7 +967,7 @@ export class MonitorGroup extends DurableObject<Env> {
       for (const ws of this.ctx.getWebSockets()) {
         const a = this.attachment(ws);
         if (a && (a.authExpires <= now || (a.role === "viewer" && (a.expires || 0) <= now))) {
-          this.send(ws, { type: "access_expired" }); ws.close(1008, "connection expired");
+          this.send(ws, { type: "session_expired" }); ws.close(1008, "connection expired");
         }
       }
       await this.syncViewing(now);

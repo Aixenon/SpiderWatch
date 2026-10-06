@@ -1,4 +1,4 @@
-import { authorize } from "./auth";
+import { authorize, handleLogin } from "./auth";
 import { json } from "./model";
 import { handleUpdates, isUpdatePath } from "./updates";
 import { signedHeadersValid, verifyInvitation } from "./identity";
@@ -55,6 +55,8 @@ export default {
       url.pathname = url.pathname.slice("/panel".length);
       if (reservedPanelPath(url.pathname)) return json({ code: "not_found" }, 404);
       request = new Request(url, request);
+      const login = await handleLogin(request, env);
+      if (login) return login.status >= 400 ? panelAuthFailure(request, login) : login;
     }
     if ((bootstrap || agent) && !local && url.protocol !== "https:") return json({ code: "https_required" }, 400);
     const enrollment = url.pathname === "/bootstrap/enroll" || url.pathname === "/v1/enroll";
@@ -82,11 +84,10 @@ export default {
     // public key, permission and replay protection before accepting a device.
     const auth = bootstrap || agent && signed ? { expires: Number.MAX_SAFE_INTEGER, subject: "device" } : await authorize(request, env, agent ? "agent" : "admin");
     if (auth instanceof Response) return !bootstrap && !agent && !url.pathname.startsWith("/api/") ? panelAuthFailure(request, auth) : auth;
-    if (url.pathname === "/api/session" || url.pathname === "/auth/login") {
+    if (url.pathname === "/api/session") {
       if (request.method !== "GET") return json({ code: "method_not_allowed" }, 405);
-      if (url.pathname === "/auth/login") return new Response(null, { status: 302, headers: { Location: "/panel/#/", "Cache-Control": "no-store" } });
       // No DO or identity API lookup: expose only the already-verified identity.
-      return json({ authenticated: true, email: "email" in auth ? auth.email : null, expires_at: auth.expires, mode: local ? "local" : "access" });
+      return json({ authenticated: true, user_id: auth.subject, login: "login" in auth ? auth.login : null, expires_at: auth.expires, mode: local ? "local" : "github" });
     }
     const mutation = !["GET", "HEAD"].includes(request.method);
     const upgrade = request.headers.get("Upgrade")?.toLowerCase() === "websocket";
@@ -107,6 +108,7 @@ export default {
     headers.set("X-Monitor-Role", bootstrap ? "bootstrap" : agent ? "agent" : "admin");
     headers.set("X-Monitor-Auth-Expires", String(auth.expires));
     headers.delete("cf-access-jwt-assertion");
+    headers.delete("Cookie");
     const forwarded = new Request(request, { headers });
     try {
       return await env.MONITOR.getByName(env.MONITOR_GROUP).fetch(forwarded);

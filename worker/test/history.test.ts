@@ -1,3 +1,4 @@
+import { githubSettings } from "./github-fixture";
 import { env } from "cloudflare:workers";
 import { evictDurableObject, reset, runInDurableObject } from "cloudflare:test";
 import { afterEach, expect, it, vi } from "vitest";
@@ -48,7 +49,7 @@ afterEach(async()=>{for(const ws of clients){try{ws.close(1000);}catch{}}clients
 
 it("keeps history behind panel identity even with forged role/device headers",async()=>{
   const storage=vi.spyOn(env.MONITOR,"getByName");
-  const configured={...env,LOCAL_DEV:"false",ACCESS_TEAM_DOMAIN:"https://history-test.cloudflareaccess.com",ACCESS_PANEL_AUD:"panel",ADMIN_EMAILS:"owner@example.test"};
+  const configured={...githubSettings()};
   const response=await worker.fetch(new Request(`https://monitor.example.test/panel/api/nodes/${id}/history?range=300`,{headers:{"X-Monitor-Role":"admin","X-Monitor-Auth-Expires":String(Date.now()+3600_000),"X-Monitor-Node-ID":id,Authorization:"Bearer "+key}}),configured);
   expect(response.status).toBe(401);expect(response.headers.get("Cache-Control")).toBe("no-store");expect(storage).not.toHaveBeenCalled();
 });

@@ -1,98 +1,64 @@
 import { env } from "cloudflare:workers";
 import { afterEach, expect, it, vi } from "vitest";
-import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import worker from "../src/index";
+import { githubSettings, origin, sessionHeaders, sessionName, sessionToken } from "./github-fixture";
 
 afterEach(() => vi.restoreAllMocks());
-let sequence = 0;
-async function fixture() {
-  const domain = `https://panel-session-${++sequence}.cloudflareaccess.com`;
-  const pair = await generateKeyPair("RS256", { extractable: true });
-  const key = await exportJWK(pair.publicKey); key.kid = "session"; key.alg = "RS256";
-  vi.spyOn(globalThis, "fetch").mockImplementation(async input => {
-    expect(String(input)).toBe(domain + "/cdn-cgi/access/certs");
-    return Response.json({ keys: [key] });
-  });
-  const configured = { ...env, LOCAL_DEV: "false", ACCESS_TEAM_DOMAIN: domain, ACCESS_PANEL_AUD: "panel-aud", ADMIN_EMAILS: "owner@example.test" };
-  const token = (email = "owner@example.test", audience = "panel-aud", expires = Math.floor(Date.now() / 1000) + 3600) => new SignJWT({ email })
-    .setProtectedHeader({ alg: "RS256", kid: "session" }).setIssuer(domain).setSubject("owner-id").setAudience(audience).setExpirationTime(expires).sign(pair.privateKey);
-  return { configured, token };
-}
-function noStorage() {
-  return vi.spyOn(env.MONITOR, "getByName").mockImplementation(() => { throw new Error("Session must not access a DO"); });
-}
+function noStorage() { return vi.spyOn(env.MONITOR, "getByName").mockImplementation(() => { throw new Error("Must not access a DO"); }); }
 
-it("keeps an unconfigured deployment closed and gives browser navigation a setup message", async () => {
-  const storage = noStorage(), configured = { ...env, LOCAL_DEV: "false" };
-  const assets = vi.spyOn(env.ASSETS, "fetch");
-  for (const key of ["ACCESS_TEAM_DOMAIN", "ACCESS_PANEL_AUD", "ADMIN_EMAILS"]) Reflect.deleteProperty(configured, key);
-  const api = await worker.fetch(new Request("https://monitor.example.test/panel/api/session", { headers: { Accept: "text/html" } }), configured);
-  expect(api.status).toBe(503); expect(await api.json()).toEqual({ code: "access_not_configured" });
-  const page = await worker.fetch(new Request("https://monitor.example.test/panel/", { headers: { Accept: "text/html" } }), configured);
-  expect(page.status).toBe(503); expect(page.headers.get("Cache-Control")).toBe("no-store");
-  expect(page.headers.get("Content-Security-Policy")).toContain("frame-ancestors 'none'");
-  const body = await page.text();
-  expect(body).toContain("登录尚未配置");
-  expect(body).toContain("Cloudflare 控制台");
-  for (const key of ["ACCESS_TEAM_DOMAIN", "ACCESS_PANEL_AUD", "ADMIN_EMAILS"]) expect(body).toContain(key);
-  const head = await worker.fetch(new Request("https://monitor.example.test/panel/", { method: "HEAD", headers: { Accept: "text/html" } }), configured);
-  expect(head.status).toBe(503); expect(await head.text()).toBe("");
+it("keeps unconfigured deployments closed and explains the required GitHub configuration", async () => {
+  const storage = noStorage(), configured = { ...env, LOCAL_DEV: "false" }, assets = vi.spyOn(env.ASSETS, "fetch");
+  const api = await worker.fetch(new Request(origin + "/panel/api/session", { headers: { Accept: "text/html" } }), configured);
+  expect(api.status).toBe(503); expect(await api.json()).toEqual({ code: "auth_not_configured" });
+  for (const method of ["GET", "HEAD"]) {
+    const page = await worker.fetch(new Request(origin + "/panel/", { method, headers: { Accept: "text/html" } }), configured);
+    expect(page.status).toBe(503); expect(page.headers.get("Cache-Control")).toBe("no-store");
+    expect(page.headers.get("Content-Security-Policy")).toContain("frame-ancestors 'none'");
+    const text = await page.text();
+    if (method === "HEAD") expect(text).toBe("");
+    else for (const value of ["登录尚未配置", "GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET", "ADMIN_GITHUB_IDS", "SESSION_SECRET"]) expect(text).toContain(value);
+  }
   expect(storage).not.toHaveBeenCalled(); expect(assets).not.toHaveBeenCalled();
 });
 
-it("protects the session, panel, assets and live upgrade against missing or forged identity headers", async () => {
-  const { configured } = await fixture(), storage = noStorage();
-  const assets = vi.spyOn(env.ASSETS, "fetch");
+it("offers a GitHub login page without exposing protected resources or fetching GitHub", async () => {
+  const storage = noStorage(), fetch = vi.spyOn(globalThis, "fetch"), assets = vi.spyOn(env.ASSETS, "fetch");
   for (const path of ["/panel/api/session", "/panel/api/state", "/panel/api/live", "/panel/style.css", "/panel/"]) {
-    const response = await worker.fetch(new Request("https://monitor.example.test" + path, { headers: { "Cf-Access-Authenticated-User-Email": "owner@example.test", "X-Monitor-Role": "admin", ...(path === "/panel/api/live" ? { Upgrade: "websocket" } : {}) } }), configured);
+    const response = await worker.fetch(new Request(origin + path, { headers: { "X-Monitor-Role": "admin", "Cf-Access-Authenticated-User-Email": "owner@example.test" } }), githubSettings());
     expect(response.status).toBe(401);
   }
-  expect(storage).not.toHaveBeenCalled(); expect(assets).not.toHaveBeenCalled();
+  const page = await worker.fetch(new Request(origin + "/panel/", { headers: { Accept: "text/html" } }), githubSettings());
+  expect(await page.text()).toContain("使用 GitHub 登录");
+  expect(storage).not.toHaveBeenCalled(); expect(assets).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled();
 });
 
-it("returns only a verified account and expiry without a database call or returning the credential", async () => {
-  const { configured, token } = await fixture(), jwt = await token(), storage = noStorage();
-  const response = await worker.fetch(new Request("https://monitor.example.test/panel/api/session", { headers: { "cf-access-jwt-assertion": jwt } }), configured);
+it("returns verified identity and expiry without a database call, token or GitHub secret", async () => {
+  const config = githubSettings(), headers = await sessionHeaders(config), storage = noStorage(), fetch = vi.spyOn(globalThis, "fetch");
+  const response = await worker.fetch(new Request(origin + "/panel/api/session", { headers }), config);
   expect(response.status).toBe(200); expect(response.headers.get("Cache-Control")).toBe("no-store");
-  const body = await response.json<{ authenticated: boolean; email: string; expires_at: number; mode: string }>();
-  expect(body).toEqual({ authenticated: true, email: "owner@example.test", expires_at: expect.any(Number), mode: "access" });
-  expect(body.expires_at).toBeGreaterThan(Date.now()); expect(JSON.stringify(body)).not.toContain(jwt);
-  expect(storage).not.toHaveBeenCalled();
+  const body = await response.json();
+  expect(body).toEqual({ authenticated: true, user_id: "12345", login: "owner", expires_at: expect.any(Number), mode: "github" });
+  expect(JSON.stringify(body)).not.toContain(headers.Cookie); expect(JSON.stringify(body)).not.toContain(config.GITHUB_CLIENT_SECRET);
+  expect(storage).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled();
 });
 
-it("rejects other audiences, expired tokens and non-admin accounts", async () => {
-  const { configured, token } = await fixture(), storage = noStorage();
-  for (const [jwt, status] of [[await token("owner@example.test", "another-app"), 401], [await token("owner@example.test", "panel-aud", 1), 401], [await token("stranger@example.test"), 403]] as const) {
-    const response = await worker.fetch(new Request("https://monitor.example.test/panel/api/session", { headers: { "cf-access-jwt-assertion": jwt } }), configured);
+it("rejects expired sessions and non-admin accounts and preserves protected HTML cache policy", async () => {
+  const config = githubSettings(), storage = noStorage();
+  for (const [changes, status] of [[{ exp: 1 }, 401], [{ sub: "999" }, 403]] as const) {
+    const response = await worker.fetch(new Request(origin + "/panel/api/session", { headers: { Cookie: sessionName + "=" + await sessionToken(config, changes) } }), config);
     expect(response.status).toBe(status);
   }
-  expect(storage).not.toHaveBeenCalled();
-});
-
-it("requires authentication and always lands on overview, ignoring supplied destinations", async () => {
-  const { configured, token } = await fixture(), jwt = await token(), storage = noStorage();
-  expect((await worker.fetch(new Request("https://monitor.example.test/panel/auth/login"), configured)).status).toBe(401);
-  for (const view of ["/settings", "/admin", "/server/" + "a".repeat(32), "//evil.example", "https://evil.example", "/\\evil.example", "/api/nodes", "/settings\r\nSet-Cookie:bad"]) {
-    const request = new Request("https://monitor.example.test/panel/auth/login?view=" + encodeURIComponent(view), { headers: { "cf-access-jwt-assertion": jwt } });
-    const response = await worker.fetch(request, configured);
-    expect(response.status).toBe(302); expect(response.headers.get("Location")).toBe("/panel/#/"); expect(response.headers.get("Cache-Control")).toBe("no-store");
-  }
-  expect(storage).not.toHaveBeenCalled();
-});
-
-it("does not cache protected HTML and does not accept session mutations", async () => {
-  const { configured, token } = await fixture(), headers = { "cf-access-jwt-assertion": await token() }, storage = noStorage();
   vi.spyOn(env.ASSETS, "fetch").mockResolvedValue(new Response("<h1>SpiderWatch</h1>", { headers: { "Content-Type": "text/html", "Cache-Control": "public, max-age=3600" } }));
-  const page = await worker.fetch(new Request("https://monitor.example.test/panel/", { headers }), configured);
-  expect(page.status).toBe(200); expect(page.headers.get("Cache-Control")).toBe("private, no-store");
-  for (const path of ["/panel/api/session", "/panel/auth/login"]) expect((await worker.fetch(new Request("https://monitor.example.test" + path, { method: "POST", headers }), configured)).status).toBe(405);
+  const headers = await sessionHeaders(config), page = await worker.fetch(new Request(origin + "/panel/", { headers }), config);
+  expect(page.headers.get("Cache-Control")).toBe("private, no-store"); await page.text();
+  for (const path of ["/panel/api/session", "/panel/auth/login"]) expect((await worker.fetch(new Request(origin + path, { method: "POST", headers }), config)).status).toBe(405);
   expect(storage).not.toHaveBeenCalled();
 });
 
-it("labels local sessions explicitly and never accepts local mode on a public host", async () => {
+it("labels loopback sessions explicitly and rejects public local mode", async () => {
   const storage = noStorage();
-  const local = await worker.fetch(new Request("http://127.0.0.1/panel/api/session"), env);
-  expect(await local.json()).toMatchObject({ authenticated: true, email: null, mode: "local" });
-  expect((await worker.fetch(new Request("https://monitor.example.test/panel/api/session"), env)).status).toBe(403);
+  const response = await worker.fetch(new Request("http://127.0.0.1/panel/api/session"), env);
+  expect(await response.json()).toMatchObject({ authenticated: true, login: null, mode: "local" });
+  expect((await worker.fetch(new Request(origin + "/panel/api/session"), env)).status).toBe(403);
   expect(storage).not.toHaveBeenCalled();
 });

@@ -16,8 +16,11 @@ jobs:
           cache: npm
           cache-dependency-path: worker/package-lock.json
       - run: npm ci
+        working-directory: .
       - run: npm run types
       - run: npm run check
       - run: npm run test:deploy
       - run: npm test
       - run: npm run build
+      - run: npm run deploy -- --dry-run
+        working-directory: .

@@ -4,7 +4,7 @@ Cloudflare Workers + SQLite Durable Objects 网络监控面板，配套单文件
 
 ## 部署到 Cloudflare
 
-需要一个 Cloudflare 账户、托管在该账户中的域名，以及包含本项目完整源码的 GitHub 仓库。通过 Cloudflare Workers Builds 连接仓库即可部署，无需配置 GitHub 部署 Secrets。
+需要一个 Cloudflare 账户和包含本项目完整源码的 GitHub 仓库。通过 Cloudflare Workers Builds 连接仓库即可部署；面板使用 GitHub 登录，无需开通 Zero Trust。可以使用 `workers.dev` 地址，也可绑定自己的域名。
 
 源码仓库可以私有保存；现有客户端安装与自动更新依赖可访问的公开 GitHub Releases。
 
@@ -15,34 +15,40 @@ Cloudflare Workers + SQLite Durable Objects 网络监控面板，配套单文件
 | 配置 | 值 |
 |---|---|
 | Worker 名称 | `spider-watch` |
-| Root directory | `worker` |
+| Root directory | `/`（默认仓库根目录） |
 | Build command | 留空 |
 | Deploy command | `npm run deploy` |
+| Preview command | `npm run preview` |
 
-点击 **Save and Deploy**。Cloudflare 一起发布前端、Worker 和 SQLite Durable Object；首次部署自动生成并保存注册邀请密钥，后续部署继续保留。
+关闭 **Enable Preview Builds**，生产分支选择 `main`。当前配置用于正式部署，分支预览需要独立设置登录和资源绑定。
+
+点击 **Save and Deploy**。Cloudflare 一起发布前端、Worker 和 SQLite Durable Object；部署脚本自动补齐注册邀请密钥和独立的会话签名密钥，后续部署保留已有密钥。
+
+已经把 Root directory 填为 `worker` 的项目也可继续使用相同命令。如果日志提示找不到 `/opt/buildhome/repo/package.json`，请部署仓库最新提交；根目录现已提供安装与部署入口。
 
 首次部署会提供 `workers.dev` 地址。登录配置未完成时，页面只显示配置提示，不能取得管理权限。
 
-### 2. 设置域名和 Cloudflare 登录
+### 2. 设置 GitHub 登录
 
-1. 在该 Worker 的 **Settings → Domains & Routes** 中添加自定义域名，例如 `monitor.example.com`。
-2. 在 Cloudflare Zero Trust 中设置团队名，记下 `https://你的团队.cloudflareaccess.com`；在 **Integrations → Identity providers** 添加 **Cloudflare**，开启 **Restrict to account members**。
-3. 在 **Access → Applications** 创建一个自托管应用，主机名使用面板域名，**Path 填写 `panel`**。登录方式只选择 **Cloudflare**，Allow 策略只允许指定的管理员邮箱，保留标准登录页。复制该应用的 **Application Audience (AUD)**。这一个应用保护面板及其全部管理接口，**无需创建 Bypass 应用或策略**。不要启用 Worker 级的 **Protect this Worker / Protect all Workers**，该模式不支持 WebSocket。
-4. 回到 Worker 的 **Settings → Variables and Secrets**，保存以下三项运行时配置：
+1. 确定面板地址，例如 `https://spider-watch.你的子域.workers.dev`。使用自定义域名时，先在 Worker 的 **Settings → Domains & Routes** 添加域名。
+2. 打开 GitHub **Settings → Developer settings → OAuth Apps → New OAuth App**。Application name 填 `SpiderWatch`，Homepage URL 填面板地址，Authorization callback URL 填 `https://你的面板地址/panel/auth/github/callback`。无需启用 Device Flow。创建后复制 Client ID，并生成 Client Secret；每位部署者创建自己的 OAuth 应用。
+3. 访问 `https://api.github.com/users/你的GitHub用户名`，记录返回的数字 `id`（不是 `node_id`）。在 Worker 的 **Settings → Variables and Secrets** 添加以下运行时配置并保存部署：
 
 | 名称 | 内容 |
 |---|---|
-| `ACCESS_TEAM_DOMAIN` | 团队域名，例如 `https://你的团队.cloudflareaccess.com` |
-| `ACCESS_PANEL_AUD` | 面板 Access 应用的 AUD |
-| `ADMIN_EMAILS` | 允许登录的管理员邮箱，多个用逗号分隔，与 Access Allow 策略一致 |
+| `GITHUB_CLIENT_ID` | OAuth 应用的 Client ID，类型 Text |
+| `GITHUB_CLIENT_SECRET` | OAuth 应用的 Client Secret，类型 Secret |
+| `ADMIN_GITHUB_IDS` | 允许登录的 GitHub 数字 ID，多个用逗号分隔，类型 Text |
 
-自定义域名和 Access 配置完成后，可在 **Domains & Routes** 关闭 `workers.dev`。后续发布会保留控制台中的域名、登录配置和此开关，无需在 GitHub 再填一份。Access 配置不完整时不会自动认领管理员。
+`SESSION_SECRET` 由部署脚本自动生成，无需手动填写。登录配置不完整时拒绝访问，不会让首位访问者自动成为管理员。后续发布保留控制台中的登录配置、域名以及 `workers.dev` 开关；更换面板域名时也要更新 GitHub OAuth 回调地址。
 
-面板、管理接口和实时连接统一位于 `/panel/` 下；设备接口继续使用专用密钥和一次性邀请验证。访问网站根地址会自动进入 `/panel/`。如果已经按旧说明保护整个域名，将原面板 Access 应用的 Path 改为 `panel`，并删除旧的客户端 Bypass 应用即可；继续使用该面板应用的 AUD。
+已有 Access 部署请先部署新版并填好 GitHub 配置，再删除本项目的 Access 应用和 Bypass 应用，关闭 Worker 级 Access 保护。旧的 `ACCESS_TEAM_DOMAIN`、`ACCESS_PANEL_AUD`、`ACCESS_AGENT_AUD`、`ADMIN_EMAILS` 可从运行时配置移除。
+
+面板和管理接口位于 `/panel/`，根地址自动跳转。登录采用 GitHub 授权码、PKCE 和管理员 ID 白名单；会话为 8 小时，Worker 本地验证签名 Cookie，无需逐次访问 GitHub 或数据库。退出清除当前浏览器会话；如需使全部已签发会话失效，可更换 `SESSION_SECRET`。已建立的实时连接按原会话到期时间关闭。客户端继续使用专用 Ed25519 密钥和一次性邀请，不依赖 GitHub 登录。
 
 ### 3. 登录并添加设备
 
-打开面板自定义域名，通过 Cloudflare 标准登录页登录。按下节安装客户端，然后在 **管理 → 添加设备** 中复制注册指令，到目标设备执行即可加入网络。
+打开面板，点击 **使用 GitHub 登录**，通过 GitHub 官方授权页返回后进入总览。按下节安装客户端，然后在 **管理 → 添加设备** 中复制注册指令，到目标设备执行即可加入网络。
 
 后续推送代码到连接的分支，Cloudflare 会自动重新部署。保持 Worker 名称 `spider-watch` 和 `MONITOR_GROUP` 不变，设备身份与设置会保留。部署面板不会自动创建客户端 Release；需要发布客户端时，按下一节操作。
 
@@ -55,7 +61,7 @@ npx wrangler login
 npm run deploy
 ```
 
-本地部署使用同一流程，自动识别首次或已有部署；域名和登录配置仍在 Cloudflare 控制台管理。
+本地部署使用同一流程，自动识别首次或已有部署；域名和 GitHub 登录配置仍在 Cloudflare 控制台管理。
 
 ## 发布与安装客户端
 
@@ -113,4 +119,4 @@ Windows 可在 **设置 → 应用 → SpiderWatch → 卸载** 移除程序、�
 
 macOS 的物理归属及 APFS 容器容量最多缓存 5 分钟，每卷数据仍随正常采样更新。
 
-Cloudflare 参考：[标准 Access 应用](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/)、[Cloudflare 登录方式](https://developers.cloudflare.com/cloudflare-one/integrations/identity-providers/cloudflare/)、[部署时上传 Secret](https://developers.cloudflare.com/workers/configuration/secrets/)。
+参考：[GitHub OAuth 应用](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/creating-an-oauth-app)、[GitHub 登录流程](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps)、[Workers 构建配置](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/)、[部署时上传 Secret](https://developers.cloudflare.com/workers/configuration/secrets/)。

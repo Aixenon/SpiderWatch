@@ -1,0 +1,13 @@
+{
+  "name": "spider-watch",
+  "version": "0.2.0",
+  "private": true,
+  "scripts": {
+    "postinstall": "npm --prefix worker ci --no-audit --no-fund",
+    "deploy": "npm --prefix worker run deploy --",
+    "preview": "npm --prefix worker run preview",
+    "build": "npm --prefix worker run build",
+    "check": "npm --prefix worker run check",
+    "test:deploy": "npm --prefix worker run test:deploy"
+  }
+}

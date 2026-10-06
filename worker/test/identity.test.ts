@@ -53,7 +53,7 @@ afterEach(async()=>{for(const ws of sockets)try{ws.close(1000);}catch{} sockets.
 
 it("authenticates production HTTPS using device signatures without a shared gate",async()=>{
   const {device}=await registered(), productionOrigin="https://monitor.example.com";
-  const production={...env,LOCAL_DEV:"false",ACCESS_AGENT_AUD:""} as Env;
+  const production={...env,LOCAL_DEV:"false"} as Env;
   const request=await signed(device,`/v1/nodes/${device.id}/status`,"GET",undefined,{},productionOrigin);
   const response=await worker.fetch(request,production);
   expect(response.status).toBe(200);expect(await response.json()).toMatchObject({state:"approved"});

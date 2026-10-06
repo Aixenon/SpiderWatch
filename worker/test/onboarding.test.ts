@@ -40,7 +40,7 @@ it("redeems an invitation immediately and preserves legacy pending credential re
   } finally { await runInDurableObject(stub(), instance => { (instance as any).env.LOCAL_DEV = "true"; }); }
   const panel = await (await request("/api/state","GET")).text();
   expect(panel).not.toContain("test-service-secret"); expect(panel).not.toContain(key);
-  const production = {...env, LOCAL_DEV:"false", ACCESS_TEAM_DOMAIN:"https://test.cloudflareaccess.com", ACCESS_AGENT_AUD:"agent-aud"};
+  const production = {...env, LOCAL_DEV:"false"};
   expect((await worker.fetch(new Request("https://monitor.example.com/v1/live",{headers:{Upgrade:"websocket",...headers,"X-Monitor-Role":"bootstrap"}}),production)).status).toBe(401);
   expect((await worker.fetch(new Request("http://monitor.example.com/bootstrap/status",{method:"POST",headers}),production)).status).toBe(400);
   await request(`/api/nodes/${id}`,"DELETE");

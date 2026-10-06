@@ -1,26 +1,16 @@
 import { env } from "cloudflare:workers";
 import { reset } from "cloudflare:test";
 import { afterEach, expect, it, vi } from "vitest";
-import { exportJWK, generateKeyPair, SignJWT } from "jose";
+import { githubSettings, sessionHeaders } from "./github-fixture";
 import worker from "../src/index";
 
 const localOrigin = "http://127.0.0.1";
 const publicOrigin = "https://monitor.example.test";
-let sequence = 0;
 afterEach(async () => { vi.restoreAllMocks(); await reset(); });
 
 async function authorized() {
-  const domain = `https://panel-routing-${++sequence}.cloudflareaccess.com`;
-  const pair = await generateKeyPair("RS256", { extractable: true });
-  const key = await exportJWK(pair.publicKey); key.kid = "panel"; key.alg = "RS256";
-  vi.spyOn(globalThis, "fetch").mockImplementation(async input => {
-    expect(String(input)).toBe(domain + "/cdn-cgi/access/certs");
-    return Response.json({ keys: [key] });
-  });
-  const configured = { ...env, LOCAL_DEV: "false", ACCESS_TEAM_DOMAIN: domain, ACCESS_PANEL_AUD: "panel", ADMIN_EMAILS: "owner@example.test" };
-  const token = await new SignJWT({ email: "owner@example.test" }).setProtectedHeader({ alg: "RS256", kid: "panel" })
-    .setIssuer(domain).setSubject("owner").setAudience("panel").setExpirationTime("1h").sign(pair.privateKey);
-  return { configured, headers: { "cf-access-jwt-assertion": token } };
+  const configured = githubSettings();
+  return { configured, headers: await sessionHeaders(configured) };
 }
 
 function noStorage() {
@@ -89,7 +79,7 @@ it("serves authenticated panel assets from the physical asset root and keeps log
   expect(page.status).toBe(200); expect(page.headers.get("Cache-Control")).toBe("private, no-store");
   expect(await page.text()).toContain("SpiderWatch");
   const session = await worker.fetch(new Request(publicOrigin + "/panel/api/session", { headers }), configured);
-  expect(await session.json()).toMatchObject({ authenticated: true, email: "owner@example.test", mode: "access" });
+  expect(await session.json()).toMatchObject({ authenticated: true, login: "owner", mode: "github" });
   const login = await worker.fetch(new Request(publicOrigin + "/panel/auth/login?next=https://evil.example", { headers }), configured);
   expect(login.status).toBe(302); expect(login.headers.get("Location")).toBe("/panel/#/");
   expect(assets).toHaveBeenCalledTimes(1); expect(storage).not.toHaveBeenCalled();
@@ -159,7 +149,7 @@ it("keeps invitation enrollment and signed device status at their unchanged root
     host: { hostname: "routing-test", os: "linux", arch: "amd64", cpus: 2, agent_version: "0.2.0" },
   }, { "X-Monitor-Invitation": token }), env);
   expect(enrolled.status).toBe(200); expect(await enrolled.json()).toMatchObject({ state: "approved" });
-  const production = { ...env, LOCAL_DEV: "false", ACCESS_TEAM_DOMAIN: "", ACCESS_AGENT_AUD: "" };
+  const production = { ...env, LOCAL_DEV: "false", GITHUB_CLIENT_ID: "", ADMIN_GITHUB_IDS: "" };
   for (const [path, method] of [[`/v1/nodes/${id}/status`, "GET"], ["/bootstrap/status", "POST"]]) {
     const response = await worker.fetch(await signed(publicOrigin, path, method), production);
     expect(response.status).toBe(200); expect(await response.json()).toMatchObject({ state: "approved" });

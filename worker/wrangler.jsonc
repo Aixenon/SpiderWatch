@@ -8,7 +8,8 @@
   "keep_vars": true,
   "ratelimits": [
     {"name": "BOOTSTRAP_LIMITER", "namespace_id": "1001", "simple": {"limit": 120, "period": 60}},
-    {"name": "BOOTSTRAP_ENROLL_LIMITER", "namespace_id": "1003", "simple": {"limit": 5, "period": 60}}
+    {"name": "BOOTSTRAP_ENROLL_LIMITER", "namespace_id": "1003", "simple": {"limit": 5, "period": 60}},
+    {"name": "LOGIN_LIMITER", "namespace_id": "1005", "simple": {"limit": 10, "period": 60}}
   ],
   "assets": {
     "directory": "./public",
@@ -33,15 +34,14 @@
       "name": "spider-watch-local",
       "ratelimits": [
         {"name": "BOOTSTRAP_LIMITER", "namespace_id": "1002", "simple": {"limit": 120, "period": 60}},
-        {"name": "BOOTSTRAP_ENROLL_LIMITER", "namespace_id": "1004", "simple": {"limit": 5, "period": 60}}
+        {"name": "BOOTSTRAP_ENROLL_LIMITER", "namespace_id": "1004", "simple": {"limit": 5, "period": 60}},
+        {"name": "LOGIN_LIMITER", "namespace_id": "1006", "simple": {"limit": 10, "period": 60}}
       ],
       "vars": {
         "MONITOR_GROUP": "100000000001",
         "UPDATE_GITHUB_REPOSITORY": "",
-        "ACCESS_TEAM_DOMAIN": "",
-        "ACCESS_AGENT_AUD": "",
-        "ACCESS_PANEL_AUD": "",
-        "ADMIN_EMAILS": "",
+        "GITHUB_CLIENT_ID": "",
+        "ADMIN_GITHUB_IDS": "",
         "LOCAL_DEV": "true"
       },
       "durable_objects": {"bindings": [{"name": "MONITOR", "class_name": "MonitorGroup"}]}

@@ -51,9 +51,9 @@ function notice(text, error = false) { $("notice").textContent = text; $("notice
 async function api(path, method="GET", body) {
   if (path !== "/panel/api/session" && !hasSession()) throw new Error("请先登录。");
   const r = await fetch(path, { method, credentials:"same-origin", redirect:"manual", cache:"no-store", headers:body ? {"Content-Type":"application/json"} : {}, body:body ? JSON.stringify(body) : undefined });
-  if (r.type === "opaqueredirect" || r.redirected || r.headers.get("Content-Type")?.includes("text/html")) { lockPanel("access_required"); throw new Error("请重新登录。"); }
+  if (r.type === "opaqueredirect" || r.redirected || r.headers.get("Content-Type")?.includes("text/html")) { lockPanel("login_required"); throw new Error("请重新登录。"); }
   const result = await r.json();
-  if (r.status === 401 || result.code === "admin_required" || result.code === "access_not_configured") { lockPanel(result.code); throw new Error($("login-description").textContent); }
+  if (r.status === 401 || result.code === "admin_required" || result.code === "auth_not_configured") { lockPanel(result.code); throw new Error($("login-description").textContent); }
   if (path !== "/panel/api/session" && authLocked) throw new Error("请先登录。");
   if (!r.ok) { const error = new Error(updateErrors[result.code] || ({ invalid_settings:"观看间隔需为 2–300 秒，无人观看间隔需为 30–86400 秒，且不小于观看间隔。", invalid_node_group:"分组名称需为 1–64 个字符。", invalid_nickname:"名字最多 128 个字符，不能包含控制字符。", invalid_icon:"请选择列表中的设备图标。", invalid_group_members:"请选择有效的设备分组。", group_name_exists:"已有同名分组。", too_many_groups:"最多支持 50 个分组。", node_group_not_found:"分组已删除，请刷新。", node_not_found:"设备已删除，请刷新。", admin_required:"此账户没有管理权限。" })[result.code] || `操作失败：${result.code || r.status}`); error.code=result.code; error.retryAfterSeconds=Number(result.retry_after_seconds)||0; throw error; }
   return result;
@@ -206,7 +206,7 @@ function connect(){
   if(!hasSession()||document.hidden||!livePage()||socket)return;
   const ws=new WebSocket(`${location.protocol==="https:"?"wss:":"ws:"}//${location.host}/panel/api/live`);socket=ws;connection("正在连接");
   ws.onopen=()=>{if(socket!==ws)return;retry=0;connection("实时连接中",true);heartbeat=setInterval(()=>{if(ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify({type:"heartbeat"}));},30000);load();};
-  ws.onmessage=event=>{if(socket!==ws)return;let msg;try{msg=JSON.parse(event.data);}catch{return;}if(msg.type==="settings")settings(msg.settings);else if(msg.type==="metrics"&&state){const n=state.nodes.find(n=>n.node_id===msg.node_id);if(n){n.metrics=msg.metrics;n.last_seen=msg.last_seen;n.connected=true;recordResourceSample(n);renderNode(n);if(page==="detail"&&location.hash.split("?")[0]===`#/server/${n.node_id}`)renderDetail();}}else if(msg.type==="refresh")load(true);else if(msg.type==="access_expired"){lockPanel("access_expired");}};
+  ws.onmessage=event=>{if(socket!==ws)return;let msg;try{msg=JSON.parse(event.data);}catch{return;}if(msg.type==="settings")settings(msg.settings);else if(msg.type==="metrics"&&state){const n=state.nodes.find(n=>n.node_id===msg.node_id);if(n){n.metrics=msg.metrics;n.last_seen=msg.last_seen;n.connected=true;recordResourceSample(n);renderNode(n);if(page==="detail"&&location.hash.split("?")[0]===`#/server/${n.node_id}`)renderDetail();}}else if(msg.type==="refresh")load(true);else if(msg.type==="session_expired"){lockPanel("session_expired");}};
   ws.onclose=()=>{if(socket!==ws)return;socket=null;clearInterval(heartbeat);connection("连接中断，等待重连");if(!document.hidden&&livePage()){const delay=Math.min(60000,2000*2**Math.min(retry++,5));reconnect=setTimeout(connect,delay+Math.random()*1000);}};
   ws.onerror=()=>{if(socket===ws)connection("暂时无法连接");};
 }
@@ -337,22 +337,22 @@ setInterval(loadQuota,300000);startSession();
 
 function hasSession() {
   if(authLocked||!session)return false;
-  if(session.expires_at<=Date.now()){lockPanel("access_expired");return false;}
+  if(session.expires_at<=Date.now()){lockPanel("session_expired");return false;}
   return true;
 }
 function loginLink() { return "/panel/auth/login"; }
-function lockPanel(code="access_required") {
+function lockPanel(code="login_required") {
   authLocked=true;session=null;clearTimeout(sessionTimer);stopLive();panelRefresh.invalidate();
   for(const dialog of document.querySelectorAll("dialog[open]"))dialog.close();
   state=undefined;currentInvitation=null;nodeRows.clear();nodePanels.clear();groupRows.clear();resourceHistory.clear();storedHistory.clear();$("detail-page").replaceChildren();
   for(const id of ["nodes","node-panels","quota","group-list"])$(id).replaceChildren();
   $("panel-content").hidden=true;$("login-panel").hidden=false;$("session-user").hidden=true;$("session-user").textContent="";$("logout").hidden=true;$("refresh").disabled=true;
   $("group").textContent="";$("connection").textContent="未登录";notice("");
-  const denied=code==="admin_required",missing=code==="access_not_configured",failed=code==="connection_failed";
+  const denied=code==="admin_required",missing=code==="auth_not_configured",failed=code==="connection_failed";
   $("login-title").textContent=missing?"登录尚未配置":denied?"没有访问权限":failed?"暂时无法验证登录":"登录 SpiderWatch";
-  $("login-description").textContent=missing?"请先配置 Access 团队域名、应用 AUD 和管理员邮箱。":denied?"当前 Cloudflare 账户没有此面板的管理权限。":failed?"连接失败，请重试。":code==="access_expired"?"会话已到期，请重新登录。":code==="local_logout"?"本地开发模式，仅演示登录与退出。":"使用 Cloudflare 账户登录后查看和管理设备。";
-  $("login-link").textContent=denied?"切换 Cloudflare 账户":failed?"重试":"使用 Cloudflare 登录";
-  $("login-link").href=denied?"/cdn-cgi/access/logout":loginLink();$("login-link").hidden=missing;
+  $("login-description").textContent=missing?"请先配置 GitHub OAuth 应用和管理员 ID。":denied?"当前 GitHub 账户没有此面板的管理权限。":failed?"连接失败，请重试。":code==="session_expired"?"会话已到期，请重新登录。":code==="local_logout"?"本地开发模式，仅演示登录与退出。":"使用 GitHub 账户登录后查看和管理设备。";
+  $("login-link").textContent=denied?"切换 GitHub 账户":failed?"重试":"使用 GitHub 登录";
+  $("login-link").href=loginLink();$("login-link").hidden=missing;
 }
 function armSessionExpiry() {
   clearTimeout(sessionTimer);
@@ -364,8 +364,8 @@ async function startSession() {
     const identity=await api("/panel/api/session");
     if(identity.authenticated!==true||!Number.isFinite(identity.expires_at)||identity.expires_at<=Date.now())throw new Error("invalid session");
     session=identity;authLocked=false;$("login-panel").hidden=true;$("panel-content").hidden=false;
-    $("session-user").textContent=identity.mode==="local"?"本地开发":identity.email;$("session-user").title=$("session-user").textContent;$("session-user").hidden=false;
-    $("logout").hidden=false;$("logout").title=identity.mode==="local"?"退出本地预览":"退出 Cloudflare Access 会话（会影响该团队的其他 Access 应用）";$("refresh").disabled=false;
+    $("session-user").textContent=identity.mode==="local"?"本地开发":identity.login;$("session-user").title=$("session-user").textContent;$("session-user").hidden=false;
+    $("logout").hidden=false;$("logout").title=identity.mode==="local"?"退出本地预览":"退出 SpiderWatch";$("refresh").disabled=false;
     // Session storage is only a landing-page preference, never authentication.
     let firstEntry=true;
     try { firstEntry=sessionStorage.getItem("spiderwatch-panel-session")!==String(identity.expires_at);sessionStorage.setItem("spiderwatch-panel-session",String(identity.expires_at)); } catch {}
@@ -373,4 +373,11 @@ async function startSession() {
     armSessionExpiry();showPage();
   } catch { if($("login-title").textContent==="正在验证登录")lockPanel("connection_failed"); }
 }
-$("logout").addEventListener("click",()=>{try{sessionStorage.removeItem("spiderwatch-panel-session");}catch{}const local=session?.mode==="local";lockPanel(local?"local_logout":"access_required");if(!local)location.assign("/cdn-cgi/access/logout");});
+$("logout").addEventListener("click",async()=>{
+  const local=session?.mode==="local";$("logout").disabled=true;
+  try{
+    if(!local){const response=await fetch("/panel/auth/logout",{method:"POST",credentials:"same-origin",redirect:"error",cache:"no-store"});if(!response.ok)throw new Error("退出失败，请重试。");}
+    try{sessionStorage.removeItem("spiderwatch-panel-session");}catch{}
+    lockPanel(local?"local_logout":"login_required");
+  }catch(error){notice(error.message,true);}finally{$("logout").disabled=false;}
+});
