@@ -24,7 +24,10 @@ export type Node = {
 };
 type StateResponse = { group: string; settings: Settings; node_groups: Group[]; nodes: Omit<Node, "series">[] };
 type HistoryResponse = { points: Point[]; to: number; from?: number; interval_seconds?: number; resolution_seconds?: number };
-export type UpdateCheck = { version: string; current_version: string; available: boolean | null };
+export type UpdateCheck = {
+  request_id: string; state: "requested" | "accepted" | "updating" | "installed" | "up_to_date" | "failed" | "timeout";
+  version: string; revision: string; updated_at: number; expires_at: number; code?: string;
+};
 export const state = reactive({ network: "", settings: { ...DEFAULT_SETTINGS }, groups: [] as Group[], nodes: [] as Node[] });
 export const runtime = reactive({ watching: false, notice: "", error: false, loading: false, ready: false, connection: "正在验证登录", last_tick: 0 });
 export const lists = reactive({
@@ -126,6 +129,7 @@ export const api = {
     if (!loaded) throw new Error("更新间隔已保存，但状态刷新失败，请刷新页面确认。");
   },
   checkUpdate(id: string) { return request<UpdateCheck>("/nodes/" + encodeURIComponent(id) + "/update-check", "POST"); },
+  updateStatus(id: string) { return request<UpdateCheck | null>("/nodes/" + encodeURIComponent(id) + "/update-status"); },
 };
 export function resourcePoints(id: string): Point[] {
   void historyRevision.value;
@@ -150,12 +154,37 @@ let wantsLive = false;
 let socket: WebSocket | undefined;
 let heartbeat: ReturnType<typeof setInterval> | undefined;
 let reconnect: ReturnType<typeof setTimeout> | undefined;
+let connectTimeout: ReturnType<typeof setTimeout> | undefined;
+let acknowledgementTimeout: ReturnType<typeof setTimeout> | undefined;
 let retry = 0;
 function liveEnabled() { return wantsLive && !document.hidden && hasSession(); }
+function clearSocketTimers() {
+  clearInterval(heartbeat); heartbeat = undefined;
+  clearTimeout(connectTimeout); connectTimeout = undefined;
+  clearTimeout(acknowledgementTimeout); acknowledgementTimeout = undefined;
+}
+function scheduleReconnect() {
+  clearTimeout(reconnect); reconnect = undefined;
+  if (!liveEnabled()) return;
+  const delay = Math.min(60000, 2000 * 2 ** Math.min(retry++, 5));
+  reconnect = setTimeout(connect, delay + Math.random() * 1000);
+}
+function closeSocket(ws: WebSocket, code: number, reason: string) {
+  try { ws.close(code, reason); }
+  catch { /* The obsolete socket must not prevent timer cleanup or reconnecting. */ }
+}
+function lostConnection(ws: WebSocket, close = true) {
+  if (socket !== ws) return;
+  socket = undefined; clearSocketTimers();
+  runtime.watching = false; runtime.connection = "连接中断，等待重连";
+  // Browsers may never emit close for a half-open connection. Invalidate it now.
+  if (close) closeSocket(ws, 4000, "connection timeout");
+  scheduleReconnect();
+}
 function stopLive() {
-  clearTimeout(reconnect); reconnect = undefined; clearInterval(heartbeat); heartbeat = undefined;
+  clearTimeout(reconnect); reconnect = undefined; clearSocketTimers();
   const old = socket; socket = undefined;
-  if (old) old.close(1000, "panel not viewing");
+  if (old) closeSocket(old, 1000, "panel not viewing");
   runtime.watching = false; runtime.connection = hasSession() ? "实时观看已暂停" : "未登录";
 }
 function connect() {
@@ -163,17 +192,31 @@ function connect() {
   clearTimeout(reconnect); reconnect = undefined;
   const ws = new WebSocket((location.protocol === "https:" ? "wss:" : "ws:") + "//" + location.host + "/panel/api/live");
   socket = ws; runtime.connection = "正在连接";
+  connectTimeout = setTimeout(() => { lostConnection(ws); }, 15000);
   ws.onopen = () => {
-    if (socket !== ws || !liveEnabled()) return;
-    retry = 0; runtime.watching = true; runtime.connection = "实时连接中";
-    heartbeat = setInterval(() => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "heartbeat" })); }, 30000);
+    if (socket !== ws) return;
+    if (!liveEnabled()) { stopLive(); return; }
+    clearTimeout(connectTimeout); connectTimeout = undefined;
+    runtime.watching = true; runtime.connection = "实时连接中";
+    heartbeat = setInterval(() => {
+      if (socket !== ws) return;
+      if (!liveEnabled()) { stopLive(); return; }
+      if (ws.readyState !== WebSocket.OPEN) { lostConnection(ws); return; }
+      // Keep the existing 30-second heartbeat cadence; only its reply gets a watchdog.
+      acknowledgementTimeout = setTimeout(() => { lostConnection(ws); }, 15000);
+      try { ws.send(JSON.stringify({ type: "heartbeat" })); }
+      catch { lostConnection(ws); }
+    }, 30000);
     void loadState();
   };
   ws.onmessage = event => {
     if (socket !== ws || !hasSession()) return;
     let message: { type?: string; settings?: Settings; node_id?: string; metrics?: NodeMetrics; last_seen?: number };
     try { message = JSON.parse(event.data); } catch { return; }
-    if (message.type === "settings" && message.settings && message.settings.version >= state.settings.version) state.settings = message.settings;
+    if (!message || typeof message !== "object") return;
+    if (["settings", "metrics", "refresh", "heartbeat_ack"].includes(message.type || "")) retry = 0;
+    if (message.type === "heartbeat_ack") { clearTimeout(acknowledgementTimeout); acknowledgementTimeout = undefined; }
+    else if (message.type === "settings" && message.settings && message.settings.version >= state.settings.version) state.settings = message.settings;
     else if (message.type === "metrics" && message.node_id && message.metrics && typeof message.last_seen === "number") {
       const node = state.nodes.find(candidate => candidate.node_id === message.node_id);
       if (!node) { void loadState(true); return; }
@@ -183,16 +226,8 @@ function connect() {
     } else if (message.type === "refresh") void loadState(true);
     else if (message.type === "session_expired") lockSession("session_expired");
   };
-  ws.onclose = () => {
-    if (socket !== ws) return;
-    socket = undefined; clearInterval(heartbeat); heartbeat = undefined;
-    runtime.watching = false; runtime.connection = "连接中断，等待重连";
-    if (liveEnabled()) {
-      const delay = Math.min(60000, 2000 * 2 ** Math.min(retry++, 5));
-      reconnect = setTimeout(connect, delay + Math.random() * 1000);
-    }
-  };
-  ws.onerror = () => { if (socket === ws) runtime.connection = "暂时无法连接"; };
+  ws.onclose = () => { lostConnection(ws, false); };
+  ws.onerror = () => { lostConnection(ws); };
 }
 export function watchLive(live: boolean) {
   wantsLive = live;
@@ -209,6 +244,10 @@ document.addEventListener("visibilitychange", () => {
 });
 window.addEventListener("pagehide", () => { refresh.invalidate(); stopLive(); });
 window.addEventListener("pageshow", resume);
+window.addEventListener("online", () => {
+  if (!liveEnabled()) return;
+  stopLive(); connect();
+});
 setInterval(() => { if (hasSession() && !document.hidden) void loadState(); }, 120000);
 watch(authenticated, valid => { if (valid) resume(); });
 onSessionInvalidated(() => {

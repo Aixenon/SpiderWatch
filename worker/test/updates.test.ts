@@ -214,14 +214,10 @@ it("serves a bounded public installer when ASSETS omits Content-Length, includin
   expect(monitor).not.toHaveBeenCalled(); expect(source.network).not.toHaveBeenCalled();
 });
 
-it("checks a registered device platform and version using the bundled deployment", async () => {
+it("does not queue a manual update for an offline or deleted device", async () => {
   bundle(); await setDOEnv();
   await runInDurableObject(stub(), (_, ctx) => ctx.storage.sql.exec("UPDATE nodes SET host=? WHERE node_id=?", JSON.stringify({ os: "Windows", arch: "amd64", agent_version: "0.7.0" }), node));
-  expect(await (await request(`/api/nodes/${node}/update-check`, "POST")).json()).toMatchObject({ version: "0.7.1", revision, current_version: "0.7.0", available: true });
-  for (const [currentRevision, expected] of [[revision, false], ["e".repeat(40), true], [undefined, true]] as const) {
-    await runInDurableObject(stub(), (_, ctx) => ctx.storage.sql.exec("UPDATE nodes SET host=? WHERE node_id=?", JSON.stringify({ os: "Windows", arch: "amd64", agent_version: "0.7.1", agent_revision: currentRevision }), node));
-    expect(await (await request(`/api/nodes/${node}/update-check`, "POST")).json()).toMatchObject({ available: expected });
-  }
+  expect(await (await request(`/api/nodes/${node}/update-check`, "POST")).json()).toMatchObject({ code:"update_device_offline" });
   await request(`/api/nodes/${node}`, "DELETE");
   expect((await request(`/api/nodes/${node}/update-check`, "POST")).status).toBe(404);
 });

@@ -48,6 +48,7 @@ type UpdatePlan struct {
 	Enabled        bool        `json:"enabled"`
 	CurrentVersion string      `json:"current_version"`
 	Version        string      `json:"version,omitempty"`
+	Revision       string      `json:"revision,omitempty"`
 	Available      bool        `json:"available"`
 	Asset          UpdateAsset `json:"-"`
 }
@@ -181,6 +182,7 @@ func (c *Client) checkUpdate(ctx context.Context, current string, automatic bool
 		return plan, err
 	}
 	plan.Version = check.Version
+	plan.Revision = check.Revision
 	if check.Revision != "" && !validBuildRevision(check.Revision) {
 		return plan, errors.New("invalid update build revision")
 	}

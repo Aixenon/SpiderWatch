@@ -45,6 +45,19 @@ function Invoke-MaintenanceProcess([string]$FilePath, [string[]]$Arguments) {
     } finally { $taskProcess.Dispose() }
 }
 
+function Register-RequestedUpdateTask([string]$Binary, [string]$Config, [string]$ProgramDirectory, $Principal, $Settings) {
+    # This task has no trigger. LocalService can only read/run this exact task;
+    # it cannot alter its SYSTEM identity, executable, arguments or definition.
+    $requestAction = New-ScheduledTaskAction -Execute $Binary -Argument ('update --requested --config "' + $Config + '"') -WorkingDirectory $ProgramDirectory
+    Register-ScheduledTask -TaskName 'spider-watch-update-request' -Action $requestAction -Principal $Principal -Settings $Settings -Force | Out-Null
+    $requestScheduler = New-Object -ComObject 'Schedule.Service'
+    $requestScheduler.Connect()
+    $requestFolder = $requestScheduler.GetFolder('\')
+    $requestTask = $requestFolder.GetTask('spider-watch-update-request')
+    # TASK_DONT_ADD_PRINCIPAL_ACE keeps the supplied protected DACL exact.
+    $requestTask.SetSecurityDescriptor('O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGX;;;S-1-5-19)', 0x10)
+}
+
 Initialize-MaintenanceEnvironment
 $taskSC = Join-Path $env:SystemRoot 'System32\sc.exe'
 $taskProgramDir = Split-Path -Parent $PSScriptRoot
@@ -59,6 +72,7 @@ if ($taskService -and $taskService.Status -ne 'Stopped') {
 }
 if ($Action -eq 'Remove') {
     Unregister-ScheduledTask -TaskName 'spider-watch-update' -Confirm:$false -ErrorAction SilentlyContinue
+    Unregister-ScheduledTask -TaskName 'spider-watch-update-request' -Confirm:$false -ErrorAction SilentlyContinue
     if ($taskService) { Invoke-MaintenanceProcess $taskSC @('delete','spider-watch') | Out-Null }
     # Preserve device identity for reinstall. Remove the installation marker so
     # a portable copy does not mistake retained state for a running service.
@@ -97,6 +111,8 @@ $taskTrigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes((Get-Ra
 $taskPrincipal = New-ScheduledTaskPrincipal -UserId SYSTEM -LogonType ServiceAccount -RunLevel Highest
 $taskSettings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 Register-ScheduledTask -TaskName 'spider-watch-update' -Action $taskUpdate -Trigger $taskTrigger -Principal $taskPrincipal -Settings $taskSettings -Force | Out-Null
+Register-RequestedUpdateTask $taskBinary $taskConfig $taskProgramDir $taskPrincipal $taskSettings
+Write-Host 'Remote update bridge installed: LocalService may run the fixed SYSTEM update task.'
 $taskPath = [Environment]::GetEnvironmentVariable('Path','Machine')
 if (@($taskPath -split ';' | Where-Object { $_.TrimEnd('\') -ieq $taskProgramDir.TrimEnd('\') }).Count -eq 0) {
     [Environment]::SetEnvironmentVariable('Path',($taskPath.TrimEnd(';') + ';' + $taskProgramDir),'Machine')

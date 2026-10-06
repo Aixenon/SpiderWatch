@@ -32,7 +32,7 @@ test('builds all targets with at most two jobs and publishes only a complete ver
       await new Promise(accept => setTimeout(accept, 1));
       active--;
     }
-    if (args.includes('--assemble')) await makeClientReleaseFixture(value(args, '--output'), { repository, revision });
+    if (args.includes('--assemble')) await makeClientReleaseFixture(value(args, '--output'), { repository, revision, version: value(args, '--version') });
     return '';
   };
   const release = await main(f.argv, { env: f.env, run: runner });
@@ -83,7 +83,7 @@ test('a missing installer prevents publishing even if the tool exits successfull
     if (args[0]?.endsWith('bootstrap_nsis.py')) return '{"compiler":"/tools/makensis","directory":"/tools"}';
     if (args.includes('--assemble')) {
       const staging = value(args, '--output');
-      await makeClientReleaseFixture(staging, { repository, revision });
+      await makeClientReleaseFixture(staging, { repository, revision, version: value(args, '--version') });
       await rm(resolve(staging, 'spider-watch-windows-arm64-setup.exe'));
     }
     return '';

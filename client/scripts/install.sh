@@ -290,6 +290,25 @@ config=$root/state/config.json
 mkdir -p "$root/state"
 chown 0:0 "$root"; chmod 755 "$root"
 chown "$account" "$root/state"; chmod 700 "$root/state"
+step "Installing the $manager remote update bridge"
+# Bridge definitions are administrator-owned. Never follow a pre-existing link
+# when replacing one, including the root-owned installation receipt.
+bridge_file() {
+  [ ! -L "$1" ] && { [ ! -e "$1" ] || [ -f "$1" ]; } || die 'Unsafe update bridge file.'
+  bridge_parent=${1%/*}
+  [ ! -L "$bridge_parent" ] || die 'Unsafe update bridge directory.'
+  if [ "$goos" = darwin ]; then bridge_ownership=$(stat -f '%u %Lp' "$bridge_parent"); else bridge_ownership=$(stat -c '%u %a' "$bridge_parent"); fi
+  bridge_target=$1
+  set -- $bridge_ownership
+  [ "$1" = 0 ] && [ "$((0$2 & 0022))" = 0 ] || die 'Update bridge directories must be root-owned and not group/world writable.'
+  bridge_temp=$(mktemp "$bridge_parent/.spider-watch-bridge.XXXXXX")
+  cat > "$bridge_temp"
+  chown 0:0 "$bridge_temp"; chmod 644 "$bridge_temp"
+  mv -f "$bridge_temp" "$bridge_target"
+}
+[ ! -L "$root/update-request-installed" ] || die 'Unsafe update bridge receipt.'
+# Reinstallation only advertises the bridge after the OS registration succeeds.
+rm -f "$root/update-request-installed"
 case "$manager" in
  systemd)
   "$prefix/spider-watch" service --config "$config" --user "$account" > /etc/systemd/system/spider-watch.service
@@ -312,9 +331,30 @@ RandomizedDelaySec=15min
 [Install]
 WantedBy=timers.target
 EOF
+  bridge_file /etc/systemd/system/spider-watch-update-request.service <<'EOF'
+[Unit]
+Description=SpiderWatch requested update
+[Service]
+Type=oneshot
+ExecStart=/opt/spider-watch/spider-watch update --requested --config /var/lib/spider-watch/state/config.json
+TimeoutStartSec=300
+UMask=0077
+EOF
+  bridge_file /etc/systemd/system/spider-watch-update-request.path <<'EOF'
+[Unit]
+Description=SpiderWatch remote update request bridge
+[Path]
+PathExists=/var/lib/spider-watch/state/update-request
+Unit=spider-watch-update-request.service
+[Install]
+WantedBy=multi-user.target
+EOF
   systemctl daemon-reload
   printf 'systemd\n' > "$root/service-installed"
-  systemctl enable --now spider-watch.service spider-watch-update.timer;;
+  printf 'systemd\n' | bridge_file "$root/update-request-installed"
+  if ! systemctl enable --now spider-watch.service spider-watch-update.timer spider-watch-update-request.path; then
+    rm -f "$root/update-request-installed"; die 'Could not start the service and remote update bridge.'
+  fi;;
  openrc)
   cat > /etc/init.d/spider-watch <<'EOF'
 #!/sbin/openrc-run
@@ -361,6 +401,19 @@ EOF
 <key>StandardOutPath</key><string>/dev/null</string><key>StandardErrorPath</key><string>/dev/null</string>
 </dict></plist>
 EOF
+  bridge_file /Library/LaunchDaemons/io.spiderwatch.update-request.plist <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>io.spiderwatch.update-request</string>
+<key>ProgramArguments</key><array><string>/opt/spider-watch/spider-watch</string><string>update</string><string>--requested</string><string>--config</string><string>/var/lib/spider-watch/state/config.json</string></array>
+<key>WatchPaths</key><array><string>/var/lib/spider-watch/state/update-request</string></array>
+<key>KeepAlive</key><dict><key>PathState</key><dict><key>/var/lib/spider-watch/state/update-request</key><true/></dict></dict>
+<key>RunAtLoad</key><true/>
+<key>ThrottleInterval</key><integer>10</integer>
+<key>StandardOutPath</key><string>/dev/null</string><key>StandardErrorPath</key><string>/dev/null</string>
+</dict></plist>
+EOF
   cat > /Library/LaunchDaemons/io.spiderwatch.update.plist <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -375,13 +428,25 @@ EOF
   printf 'launchd\n' > "$root/service-installed"
   launchctl bootstrap system /Library/LaunchDaemons/io.spiderwatch.monitor.plist
   launchctl bootout system/io.spiderwatch.update 2>/dev/null || true
-  launchctl bootstrap system /Library/LaunchDaemons/io.spiderwatch.update.plist;;
+  launchctl bootstrap system /Library/LaunchDaemons/io.spiderwatch.update.plist
+  launchctl bootout system/io.spiderwatch.update-request 2>/dev/null || true
+  printf 'launchd\n' | bridge_file "$root/update-request-installed"
+  if ! launchctl bootstrap system /Library/LaunchDaemons/io.spiderwatch.update-request.plist; then
+    rm -f "$root/update-request-installed"; die 'Could not register the remote update bridge.'
+  fi;;
 esac
 log 'System service installed and started.'
 if [ "$manager" = openrc ] || [ "$manager" = procd ]; then
   if command -v crontab >/dev/null 2>&1; then
-    { crontab -l 2>/dev/null | grep -v '# spider-watch-update$' || true; printf '17 */6 * * * /opt/spider-watch/spider-watch update --automatic --config /var/lib/spider-watch/state/config.json >/dev/null 2>&1 # spider-watch-update\n'; } | crontab -
-  else printf 'No cron available: use sudo spider-watch --update for updates.\n'; fi
+    { crontab -l 2>/dev/null | grep -v '# spider-watch-update\(-request\)\{0,1\}$' || true
+      printf '17 */6 * * * /opt/spider-watch/spider-watch update --automatic --config /var/lib/spider-watch/state/config.json >/dev/null 2>&1 # spider-watch-update\n'
+      printf '* * * * * [ ! -e /var/lib/spider-watch/state/update-request ] || /opt/spider-watch/spider-watch update --requested --config /var/lib/spider-watch/state/config.json >/dev/null 2>&1 # spider-watch-update-request\n'
+    } | crontab -
+    printf '%s\n' "$manager" | bridge_file "$root/update-request-installed"
+    log 'Remote update bridge installed (cron handles requests within one minute).'
+  else log 'No cron available: remote update requests are unavailable; use sudo spider-watch --update.'; fi
+else
+  log 'Remote update bridge installed.'
 fi
 if [ -n "$server" ]; then
   configure

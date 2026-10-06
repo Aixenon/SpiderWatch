@@ -14,11 +14,12 @@ import {
 } from "./model";
 import { addCounts, countKeys, emptyCounts, forecast, hourOf, splitSpan, sumUsage, type Counts, type HourUsage } from "./usage";
 import { emptyUpdateCache, readBundledRelease, updateRepository, UpdateSourceError, type UpdateCache, type UpdateConfig, type UpdateState } from "./update-source";
+import { activeUpdate, publicUpdate, type DeviceUpdate } from "./device-updates";
 
 type Attachment = {
   role: "agent" | "viewer"; id?: string; authExpires: number; expires?: number; closed?: boolean; closedAt?: number;
   interval?: number; version?: number; session?: string; sequence?: number; lastReport?: number; savedAt?: number;
-  agentVersion?: string; agentRevision?: string; host?: Host; protocol?: 2;
+  agentVersion?: string; agentRevision?: string; host?: Host; protocol?: 2; updateControl?: 1;
   epoch: number; hour: number; pending: Counts; exposureAt: number;
 };
 type Runtime = { created: number; checkpoint: number; epoch: number; viewCursor: number; viewing: boolean; viewExpires: number };
@@ -93,6 +94,10 @@ export class MonitorGroup extends DurableObject<Env> {
         if (!columns.some(column => column.name === "history_interval_seconds")) ctx.storage.sql.exec("ALTER TABLE nodes ADD COLUMN history_interval_seconds INTEGER NOT NULL DEFAULT 600");
         ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS history_batches (id INTEGER PRIMARY KEY, until INTEGER NOT NULL, generation TEXT NOT NULL, codec TEXT NOT NULL, payload BLOB NOT NULL)");
         ctx.storage.sql.exec("INSERT OR REPLACE INTO config (id,value) VALUES (4,'5')");
+      });
+      if (!schema || Number(schema.value) < 6) ctx.storage.transactionSync(() => {
+        ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS node_updates (node_id TEXT PRIMARY KEY, value TEXT NOT NULL)");
+        ctx.storage.sql.exec("INSERT OR REPLACE INTO config (id,value) VALUES (4,'6')");
       });
       this.refreshInvitationDeadline();
       const config = new Map(this.query<{id:number;value:string}>("SELECT id,value FROM config WHERE id IN (1,2,3,9)").map(row => [row.id, row.value]));
@@ -361,6 +366,61 @@ export class MonitorGroup extends DurableObject<Env> {
     return json(state);
   }
 
+  private deviceUpdate(id: string): DeviceUpdate | null {
+    const row = this.query<{value:string}>("SELECT value FROM node_updates WHERE node_id=?", id)[0];
+    return row ? JSON.parse(row.value) : null;
+  }
+  private saveDeviceUpdate(id: string, job: DeviceUpdate): void {
+    this.query("INSERT INTO node_updates(node_id,value) VALUES(?,?) ON CONFLICT(node_id) DO UPDATE SET value=excluded.value", id, JSON.stringify(job));
+  }
+  private async dispatchUpdate(id: string): Promise<Response> {
+    if (!this.query("SELECT node_id FROM nodes WHERE node_id=? AND state='approved'", id).length) return json({code:"node_not_found"},404);
+    const existing = this.deviceUpdate(id);
+    if (activeUpdate(existing)) return json(publicUpdate(existing));
+    const state = this.readUpdateState();
+    if (!state.config.enabled) return json({code:"updates_disabled"},409);
+    const source = await this.checkUpdateSource(state.source);
+    // Loading the manifest yields; recheck identity, policy and concurrent clicks.
+    const node = this.query<Device>("SELECT * FROM nodes WHERE node_id=? AND state='approved'", id)[0];
+    if (!node) return json({code:"node_not_found"},404);
+    if (!this.readUpdateState().config.enabled) return json({code:"updates_disabled"},409);
+    const current = this.deviceUpdate(id);
+    if (activeUpdate(current)) return json(publicUpdate(current));
+    const socket = this.sockets("agent").find(ws => this.attachment(ws)?.id === id);
+    if (!socket) return json({code:"update_device_offline"},409);
+    const attachment = this.attachment(socket)!;
+    if (attachment.protocol !== 2 || attachment.updateControl !== 1) return json({code:"update_client_upgrade_required"},409);
+    if (source.error || !source.current) return json({code:source.error || "update_bundle_unavailable"},503);
+    const host = attachment.host!;
+    if (!source.current.assets.some(asset => asset.os === String(host.os).toLowerCase() && asset.arch === host.arch)) return json({code:"update_platform_unavailable"},409);
+    const now = Date.now();
+    const job: DeviceUpdate = {request_id:randomHex(16), version:source.current.version, revision:source.current.revision,
+      state:"requested", updated_at:now, expires_at:now + 10 * 60_000};
+    this.saveDeviceUpdate(id, job);
+    try { socket.send(JSON.stringify({type:"update",request_id:job.request_id})); }
+    catch { job.state = "failed"; job.code = "update_send_failed"; this.saveDeviceUpdate(id, job); }
+    return json(publicUpdate(job));
+  }
+  private async updateResult(request: Request, id: string): Promise<Response> {
+    const body = await readJSON(request, 1024) as Record<string, unknown> | null;
+    if (!body || typeof body.request_id !== "string" || !/^[a-f0-9]{32}$/.test(body.request_id)
+      || !["accepted","updating","up_to_date","failed"].includes(String(body.state))
+      || (body.code !== undefined && body.code !== "update_failed")) return json({code:"invalid_update_result"},400);
+    if (!this.query("SELECT node_id FROM nodes WHERE node_id=? AND state='approved'",id).length) return json({code:"revoked"},403);
+    const job = this.deviceUpdate(id);
+    if (!activeUpdate(job) || job.request_id !== body.request_id) return json({code:"update_request_expired"},409);
+    // The privileged helper claims once. Socket receipt alone is not a claim.
+    if (body.state === "accepted") {
+      if (job.claimed) return json({code:"update_request_conflict"},409);
+      job.claimed = true;
+    } else if (!job.claimed) return json({code:"update_request_conflict"},409);
+    if (body.state === "accepted" && job.state === "updating") return json({code:"update_request_conflict"},409);
+    job.state = body.state as DeviceUpdate["state"]; job.updated_at = Date.now();
+    if (body.state === "failed") job.code = "update_failed";
+    this.saveDeviceUpdate(id, job);
+    return json({ok:true});
+  }
+
   async fetch(request: Request): Promise<Response> {
     const started = Date.now(), url = new URL(request.url);
     const writesBefore = this.counter().sql_written;
@@ -420,6 +480,15 @@ export class MonitorGroup extends DurableObject<Env> {
       if (url.pathname === "/v1/enroll" && request.method === "POST") return await this.enroll(request);
       const device = await this.authenticateDevice(request);
       if (device instanceof Response) return device;
+      if (url.pathname === "/v1/update/request" || url.pathname === "/v1/update/result") {
+        if (device.state !== "approved") return json({code:device.state},403);
+        if (url.pathname.endsWith("/request") && request.method === "GET") {
+          const job = this.deviceUpdate(device.node_id);
+          return json(activeUpdate(job) && !job.claimed ? {request_id:job.request_id,version:job.version,revision:job.revision,expires_at:job.expires_at} : {request_id:""});
+        }
+        if (url.pathname.endsWith("/result") && request.method === "POST") return await this.updateResult(request,device.node_id);
+        return json({code:"method_not_allowed"},405);
+      }
       if (request.method === "DELETE" && url.pathname === `/v1/nodes/${device.node_id}`) {
         // Leaving locally does not cancel the administrator's lasting approval.
         this.disconnectDevice(device.node_id); return this.responseState(device);
@@ -542,6 +611,7 @@ export class MonitorGroup extends DurableObject<Env> {
       this.counter().sql_written += batches.rowsWritten;
       this.query("DELETE FROM nodes WHERE node_id=?", id);
       this.query("DELETE FROM auth_nonces WHERE node_id=?", id);
+      this.query("DELETE FROM node_updates WHERE node_id=?", id);
       if (!this.historyWindow || !this.query("SELECT node_id FROM nodes WHERE history_window=? LIMIT 1", this.historyWindow.from).length) {
         this.query("DELETE FROM config WHERE id=9");
         this.historyWindow = null;
@@ -689,33 +759,11 @@ export class MonitorGroup extends DurableObject<Env> {
       this.refreshViewers(); return json({ok: true, changed: ids.length});
     }
     const updateMatch = /^\/api\/nodes\/([a-f0-9]{32})\/update-check$/.exec(url.pathname);
-    if (updateMatch && request.method === "POST") {
-      let node = this.query<Device>("SELECT * FROM nodes WHERE node_id=? AND state='approved'", updateMatch[1])[0];
-      if (!node) return json({code:"node_not_found"},404);
-      const state = this.readUpdateState();
-      if (!state.config.enabled) return json({code:"updates_disabled"},409);
-      try {
-        const source = await this.checkUpdateSource(state.source);
-        // Never disclose a result for a device deleted while static metadata was loading.
-        node = this.query<Device>("SELECT * FROM nodes WHERE node_id=? AND state='approved'", updateMatch[1])[0];
-        if (!node) return json({code:"node_not_found"},404);
-        if (!this.readUpdateState().config.enabled) return json({code:"updates_disabled"},409);
-        if (source.error) return json({code:source.error},502);
-        const host = JSON.parse(node.host), current = host.agent_version || "";
-        const available = source.current?.assets.some(asset => asset.os === String(host.os).toLowerCase() && asset.arch === host.arch);
-        if (!available) return json({code:"update_platform_unavailable"},409);
-        const before = /^(\d+)\.(\d+)\.(\d+)(.*)$/.exec(current), after = source.current!.version.split(".").map(Number);
-        let newer: boolean | null = null;
-        if (before) {
-          newer = false;
-          for (let i=0;i<3;i++) if (after[i] !== Number(before[i+1])) { newer = after[i] > Number(before[i+1]); break; }
-          if (after.every((value,index)=>value===Number(before[index+1])) && (before[4] || host.agent_revision !== source.current!.revision)) newer = true;
-        }
-        return json({version:source.current!.version,revision:source.current!.revision,current_version:current,available:newer});
-      } catch(error) {
-        if (error instanceof UpdateSourceError) return json({code:error.code},error.status);
-        throw error;
-      }
+    if (updateMatch && request.method === "POST") return await this.dispatchUpdate(updateMatch[1]);
+    const statusMatch = /^\/api\/nodes\/([a-f0-9]{32})\/update-status$/.exec(url.pathname);
+    if (statusMatch && request.method === "GET") {
+      if (!this.query("SELECT node_id FROM nodes WHERE node_id=? AND state='approved'",statusMatch[1]).length) return json({code:"node_not_found"},404);
+      return json(publicUpdate(this.deviceUpdate(statusMatch[1])));
     }
     const deleteMatch = /^\/api\/nodes\/([a-f0-9]{32})$/.exec(url.pathname);
     if (deleteMatch && request.method === "PATCH") {
@@ -849,9 +897,9 @@ export class MonitorGroup extends DurableObject<Env> {
         await this.syncViewing(now);
       } else {
         if (body && typeof body === "object" && (body as {type?: string}).type === "hello") {
-          const hello = body as {protocol?: number; session?: string; host?: Record<string, unknown>};
+          const hello = body as {protocol?: number; session?: string; host?: Record<string, unknown>; update_control?: number};
           const host = hello.host && { ...hello.host, agent_version: a.agentVersion, agent_revision: a.agentRevision };
-          if (a.protocol || hello.protocol !== 2 || !a.agentVersion || typeof hello.session !== "string" || !/^[a-f0-9]{32}$/.test(hello.session) || !validHost(host)) { ws.close(1008, "invalid hello"); return; }
+          if (a.protocol || (hello.update_control !== undefined && hello.update_control !== 1) || hello.protocol !== 2 || !a.agentVersion || typeof hello.session !== "string" || !/^[a-f0-9]{32}$/.test(hello.session) || !validHost(host)) { ws.close(1008, "invalid hello"); return; }
           // Store only bounded host fields: arbitrary client keys must not
           // grow the hibernation attachment or consume database storage.
           a.host = { hostname: host.hostname, os: host.os, arch: host.arch, cpus: host.cpus, agent_version: a.agentVersion };
@@ -866,8 +914,29 @@ export class MonitorGroup extends DurableObject<Env> {
           // A version/host change is infrequent and worth persisting once, so
           // the panel still shows the upgraded version after the socket closes.
           if (stored.host !== serializedHost) this.query("UPDATE nodes SET host=? WHERE node_id=?", serializedHost, a.id!);
-          a.protocol = 2; a.session = hello.session; a.sequence = 0;
-          ws.serializeAttachment(a); this.send(ws, {type: "hello_ack"}); return;
+          a.protocol = 2; a.session = hello.session; a.sequence = 0; a.updateControl = hello.update_control;
+          const job = this.deviceUpdate(a.id!);
+          if (activeUpdate(job) && job.claimed && job.version === a.agentVersion && job.revision === a.agentRevision) {
+            job.state = "installed"; job.updated_at = Date.now(); this.saveDeviceUpdate(a.id!,job);
+          }
+          ws.serializeAttachment(a); this.send(ws, {type: "hello_ack"});
+          // Reuse the durable request after a lost frame or reconnect. The
+          // helper's atomic claim and the client's ID cache prevent duplicates.
+          if (a.updateControl === 1 && activeUpdate(job) && !job.claimed) this.send(ws,{type:"update",request_id:job.request_id});
+          return;
+        }
+        if (body && typeof body === "object" && (body as {type?:string}).type === "update_ack" && a.updateControl === 1) {
+          const ack = body as {request_id?:unknown;state?:unknown;code?:unknown};
+          if (typeof ack.request_id !== "string" || !/^[a-f0-9]{32}$/.test(ack.request_id)
+            || !["accepted","failed"].includes(String(ack.state)) || (ack.code !== undefined && ack.code !== "update_trigger_failed")) { ws.close(1008,"invalid update receipt"); return; }
+          const job = this.deviceUpdate(a.id!);
+          // Ignore late receipts; they must not regress a claimed or completed job.
+          if (activeUpdate(job) && !job.claimed && job.request_id === ack.request_id && job.state === "requested") {
+            job.state = ack.state as "accepted" | "failed"; job.updated_at = Date.now();
+            if (ack.state === "failed") job.code = "update_trigger_failed";
+            this.saveDeviceUpdate(a.id!,job);
+          }
+          return;
         }
         if (a.protocol === 2) {
           const compact = body as {type?: string; sequence?: number; metrics?: Metrics} | null;

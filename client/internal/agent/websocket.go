@@ -16,6 +16,10 @@ import (
 const livePingInterval = 60 * time.Second
 const liveReadTimeout = 180 * time.Second
 
+var errLiveSuperseded = errors.New("WebSocket connection replaced by another client")
+
+type liveTiming struct{ ping, read time.Duration }
+
 type liveControl struct {
 	Protocol    int    `json:"protocol"`
 	Compression string `json:"compression"`
@@ -26,6 +30,7 @@ type liveControl struct {
 	Idle        int    `json:"idle_seconds"`
 	Version     int    `json:"version"`
 	Sequence    uint64 `json:"sequence"`
+	RequestID   string `json:"request_id"`
 }
 
 type liveEvent struct {
@@ -36,7 +41,7 @@ type liveEvent struct {
 // A control frame and the following connection close must share one FIFO.
 // Separate control/error channels let select deliver EOF before an already-read
 // acknowledgement or revocation, losing the server's last protocol decision.
-func readLiveEvents(ctx context.Context, conn *websocket.Conn, events chan<- liveEvent) {
+func readLiveEvents(ctx context.Context, conn *websocket.Conn, events chan<- liveEvent, readTimeout time.Duration) {
 	send := func(event liveEvent) bool {
 		select {
 		case events <- event:
@@ -60,7 +65,7 @@ func readLiveEvents(ctx context.Context, conn *websocket.Conn, events chan<- liv
 			send(liveEvent{err: errors.New("invalid WebSocket control")})
 			return
 		}
-		_ = conn.SetReadDeadline(time.Now().Add(liveReadTimeout))
+		_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
 		if !send(liveEvent{control: message}) {
 			return
 		}
@@ -71,6 +76,10 @@ func readLiveEvents(ctx context.Context, conn *websocket.Conn, events chan<- liv
 // Standard WebSocket Ping/Pong frames keep an idle connection alive without
 // generating Durable Object application-message events.
 func (c *Client) Live(ctx context.Context, collector *Collector, session string, sequence *uint64, once bool) error {
+	return c.live(ctx, collector, session, sequence, once, liveTiming{livePingInterval, liveReadTimeout})
+}
+
+func (c *Client) live(ctx context.Context, collector *Collector, session string, sequence *uint64, once bool, timing liveTiming) error {
 	u, err := url.Parse(strings.TrimRight(c.config.Server, "/") + "/v1/live")
 	if err != nil {
 		return errors.New("invalid WebSocket endpoint")
@@ -123,15 +132,24 @@ func (c *Client) Live(ctx context.Context, collector *Collector, session string,
 	conn.SetReadLimit(MaxResponseBytes)
 	readCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
-	defer func() { cancel(); conn.Close(); <-done }()
+	var updateDone chan remoteUpdateAck
+	var updatingID string
+	defer func() {
+		cancel()
+		conn.Close()
+		<-done
+		if updateDone != nil {
+			c.remoteUpdates.remember(<-updateDone)
+		}
+	}()
 	events := make(chan liveEvent, 4)
-	conn.SetPongHandler(func(string) error { return conn.SetReadDeadline(time.Now().Add(liveReadTimeout)) })
+	conn.SetPongHandler(func(string) error { return conn.SetReadDeadline(time.Now().Add(timing.read)) })
 	_ = conn.SetReadDeadline(time.Now().Add(time.Duration(c.config.Timeout) * time.Second))
 	go func() {
 		defer close(done)
-		readLiveEvents(readCtx, conn, events)
+		readLiveEvents(readCtx, conn, events, timing.read)
 	}()
-	ping := time.NewTicker(livePingInterval)
+	ping := time.NewTicker(timing.ping)
 	defer ping.Stop()
 	// A config frame is mandatory before collecting or sending metrics.
 	timer := time.NewTimer(time.Duration(c.config.Timeout) * time.Second)
@@ -147,6 +165,14 @@ func (c *Client) Live(ctx context.Context, collector *Collector, session string,
 	var lastSent time.Time
 	var awaiting uint64
 	var ackDeadline time.Time
+	healthy := false
+	writeUpdateAck := func(ack remoteUpdateAck) error {
+		_ = conn.SetWriteDeadline(time.Now().Add(time.Duration(c.config.Timeout) * time.Second))
+		if conn.WriteJSON(ack) != nil {
+			return errors.New("WebSocket update acknowledgement failed")
+		}
+		return nil
+	}
 	reset := func(delay time.Duration) {
 		if !timer.Stop() {
 			select {
@@ -171,6 +197,12 @@ func (c *Client) Live(ctx context.Context, collector *Collector, session string,
 		case <-ctx.Done():
 			_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "shutdown"), time.Now().Add(time.Second))
 			return ctx.Err()
+		case ack := <-updateDone:
+			updateDone, updatingID = nil, ""
+			c.remoteUpdates.remember(ack)
+			if err := writeUpdateAck(ack); err != nil {
+				return err
+			}
 		case event := <-events:
 			if event.err != nil {
 				return event.err
@@ -185,11 +217,47 @@ func (c *Client) Live(ctx context.Context, collector *Collector, session string,
 				reschedule()
 			case "revoked":
 				return ErrRevoked
-			case "access_expired", "superseded":
-				return errors.New("WebSocket authorization expired or connection replaced")
+			case "superseded":
+				return errLiveSuperseded
+			case "access_expired":
+				return errors.New("WebSocket authorization expired")
+			case "update":
+				if protocol != 2 || !helloSent || !validUpdateRequestID(control.RequestID) {
+					return errors.New("invalid WebSocket update request")
+				}
+				if control.RequestID == updatingID {
+					continue
+				}
+				if ack, found := c.remoteUpdates.find(control.RequestID); found {
+					if err := writeUpdateAck(ack); err != nil {
+						return err
+					}
+					continue
+				}
+				if updateDone != nil {
+					ack := remoteUpdateAck{Type: "update_ack", RequestID: control.RequestID, State: "failed", Code: "update_trigger_failed"}
+					c.remoteUpdates.remember(ack)
+					if err := writeUpdateAck(ack); err != nil {
+						return err
+					}
+					continue
+				}
+				updatingID = control.RequestID
+				updateDone = make(chan remoteUpdateAck, 1)
+				go func(id string, result chan<- remoteUpdateAck) {
+					triggerCtx, stop := context.WithTimeout(readCtx, 15*time.Second)
+					defer stop()
+					result <- c.remoteUpdates.start(triggerCtx, c.configPath, id)
+				}(updatingID, updateDone)
 			case "ack":
 				if awaiting != 0 && control.Sequence == awaiting {
 					awaiting = 0
+					if !healthy {
+						healthy = true
+						if c.liveHealthy != nil {
+							c.liveHealthy()
+						}
+					}
 					if once {
 						return nil
 					}
@@ -209,7 +277,7 @@ func (c *Client) Live(ctx context.Context, collector *Collector, session string,
 					host.Version = ""
 					host.Revision = ""
 					_ = conn.SetWriteDeadline(time.Now().Add(time.Duration(c.config.Timeout) * time.Second))
-					if conn.WriteJSON(LiveHello{Type: "hello", Protocol: 2, Session: session, Host: host}) != nil {
+					if conn.WriteJSON(LiveHello{Type: "hello", Protocol: 2, Session: session, UpdateControl: 1, Host: host}) != nil {
 						return errors.New("WebSocket hello failed")
 					}
 					helloSent = true

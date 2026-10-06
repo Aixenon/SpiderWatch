@@ -21,8 +21,8 @@ type RunOptions struct {
 	Logger     *log.Logger
 }
 
-// Run performs one bounded operation at a time. There is no history, upload
-// queue, metrics HTTP listener, subprocess, periodic file write or worker pool.
+// Run has no history queue, metrics HTTP listener, periodic file writes or
+// update polling. A panel request may trigger one short installed update bridge.
 func Run(ctx context.Context, config Config, options RunOptions) error {
 	if err := CheckStartupMemory(); err != nil {
 		return err
@@ -32,6 +32,7 @@ func Run(ctx context.Context, config Config, options RunOptions) error {
 		return err
 	}
 	defer client.Close()
+	client.configPath = options.ConfigPath
 	logger := options.Logger
 	if logger == nil {
 		logger = log.New(io.Discard, "", 0)
@@ -44,6 +45,12 @@ func Run(ctx context.Context, config Config, options RunOptions) error {
 	}
 	session := hex.EncodeToString(sessionBytes[:])
 	state, sequence, failures := "pending", uint64(0), 0
+	client.liveHealthy = func() {
+		if failures > 0 {
+			logger.Print("connection recovered")
+		}
+		failures = 0
+	}
 	interval := time.Duration(config.Interval) * time.Second
 	liveTransport := false
 	guardContext, cancel := context.WithCancel(ctx)
@@ -159,11 +166,10 @@ func Run(ctx context.Context, config Config, options RunOptions) error {
 		if options.Once {
 			return err
 		}
-		retryInterval := interval
-		if liveTransport && failures > 0 {
-			retryInterval = 60 * time.Second
+		delay := retryDelay(interval, failures)
+		if failures > 0 && (liveTransport || state != "approved") {
+			delay = liveRetryDelay(failures, errors.Is(err, errLiveSuperseded))
 		}
-		delay := retryDelay(retryInterval, failures)
 		if failures == 0 {
 			delay -= time.Since(started)
 			if delay < time.Second {
@@ -183,6 +189,22 @@ func Run(ctx context.Context, config Config, options RunOptions) error {
 		case <-timer.C:
 		}
 	}
+}
+
+// A working session resets this sequence after an acknowledged report. A
+// duplicated identity backs off immediately, avoiding clients evicting each
+// other every few seconds. Outages eventually need at most one dial per minute.
+func liveRetryDelay(failures int, superseded bool) time.Duration {
+	delays := [...]time.Duration{2, 5, 10, 30, 60}
+	index := failures - 1
+	if index < 0 {
+		index = 0
+	}
+	if index >= len(delays) || superseded {
+		index = len(delays) - 1
+	}
+	delay := delays[index] * time.Second
+	return delay + time.Duration(rand.Int64N(int64(delay/10)+1))
 }
 
 func retryDelay(interval time.Duration, failures int) time.Duration {

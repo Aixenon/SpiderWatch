@@ -298,11 +298,20 @@ func execute(ctx context.Context, args []string, out, errOut io.Writer) (resultE
 	case "update":
 		checkOnly := flags.Bool("check", false, "check for a newer stable version without downloading or installing it")
 		automatic := flags.Bool("automatic", false, "honor the panel's per-device automatic update setting")
+		requested := flags.Bool("requested", false, "handle one pending panel update through the installed service")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
 		if flags.NArg() != 0 {
 			return errors.New("unexpected positional arguments")
+		}
+		if *requested {
+			if *automatic || *checkOnly {
+				return errors.New("--requested cannot be combined with --automatic or --check")
+			}
+			if err := agent.PrepareRequestedUpdate(*configPath); err != nil {
+				return err
+			}
 		}
 		c, err := agent.LoadConfig(*configPath)
 		if *automatic && errors.Is(err, os.ErrNotExist) {
@@ -319,6 +328,13 @@ func execute(ctx context.Context, args []string, out, errOut io.Writer) (resultE
 			return err
 		}
 		defer client.Close()
+		if *requested {
+			result, err := client.RequestedUpdate(ctx, version, *configPath)
+			if err != nil {
+				return err
+			}
+			return printJSON(out, result)
+		}
 		var plan agent.UpdatePlan
 		if *automatic {
 			plan, err = client.CheckAutomaticUpdate(ctx, version)

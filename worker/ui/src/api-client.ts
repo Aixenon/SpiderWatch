@@ -18,8 +18,16 @@ const errors: Record<string, string> = {
   unsafe_release_redirect: "更新下载地址无效，请检查发布来源。",
   release_changed: "已发布版本的内容发生变化，请发布新的版本号。", release_version_regressed: "可用版本低于已检查版本，已拒绝降级。",
   updates_disabled: "本网络尚未启用更新分发。", update_temporarily_unavailable: "更新服务暂时不可用，请稍后重试。",
+  update_device_offline: "设备当前离线，请恢复连接后重试。",
+  update_client_upgrade_required: "此客户端尚不支持远程更新，请先在设备上运行一次新版安装器。",
+  update_trigger_failed: "设备上的更新任务不可用，请重新运行新版安装器后重试。",
+  update_failed: "设备更新检查、下载或安装失败，请查看设备日志后重试。",
+  update_send_failed: "发送时设备连接已中断，请等待重新上线后重试。",
+  update_request_expired: "更新请求已超时，尚未确认安装结果。",
+  update_request_conflict: "设备已有更新任务正在处理，请稍后查看结果。",
   temporarily_unavailable: "服务暂时不可用，请稍后重试。", too_many_viewers: "实时观看人数已达上限，请稍后重试。",
 };
+export function apiErrorMessage(code: string) { return errors[code] || "操作失败：" + code; }
 export async function request<T = unknown>(path: string, method = "GET", body?: unknown, options: Pick<RequestInit, "keepalive" | "signal"> = {}): Promise<T> {
   const url = path.startsWith("/panel/api/") ? path : "/panel/api" + (path.startsWith("/") ? path : "/" + path);
   const isSession = url === "/panel/api/session";
@@ -44,6 +52,6 @@ export async function request<T = unknown>(path: string, method = "GET", body?: 
     access.lock(code); throw new APIError("请重新登录。", code);
   }
   if (!isSession && !access.valid()) throw new APIError("会话已结束，请重新登录。", "session_expired");
-  if (!response.ok) throw new APIError(errors[code] || "操作失败：" + code, code, Number(result?.retry_after_seconds) || 0);
+  if (!response.ok) throw new APIError(apiErrorMessage(code), code, Number(result?.retry_after_seconds) || 0);
   return result;
 }

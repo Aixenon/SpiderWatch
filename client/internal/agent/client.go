@@ -18,10 +18,13 @@ import (
 )
 
 type Client struct {
-	config       Config
-	http         *http.Client
-	transport    *http.Transport
-	websocketTLS *tls.Config
+	config        Config
+	http          *http.Client
+	transport     *http.Transport
+	websocketTLS  *tls.Config
+	configPath    string
+	liveHealthy   func()
+	remoteUpdates remoteUpdateControl
 }
 
 type HTTPError struct {

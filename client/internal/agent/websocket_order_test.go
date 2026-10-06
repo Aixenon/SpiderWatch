@@ -50,7 +50,7 @@ func TestLiveReaderPreservesControlsBeforeTerminalEvent(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
 			events, done := make(chan liveEvent, 4), make(chan struct{})
-			go func() { defer close(done); readLiveEvents(ctx, conn, events) }()
+			go func() { defer close(done); readLiveEvents(ctx, conn, events, liveReadTimeout) }()
 			select {
 			case <-done:
 			case <-ctx.Done():
@@ -172,7 +172,7 @@ func TestLiveReaderCancellationUnblocksFullEventQueue(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	events, done := make(chan liveEvent, 1), make(chan struct{})
-	go func() { defer close(done); readLiveEvents(ctx, conn, events) }()
+	go func() { defer close(done); readLiveEvents(ctx, conn, events, liveReadTimeout) }()
 	select {
 	case event := <-events:
 		if event.err != nil {

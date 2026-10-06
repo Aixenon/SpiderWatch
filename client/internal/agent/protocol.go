@@ -20,10 +20,11 @@ type HostInfo struct {
 // Live protocol 2 binds identity/version to the authenticated connection. Only
 // metadata that can change between agent runs travels in its one hello frame.
 type LiveHello struct {
-	Type     string   `json:"type"`
-	Protocol int      `json:"protocol"`
-	Session  string   `json:"session"`
-	Host     HostInfo `json:"host"`
+	Type          string   `json:"type"`
+	Protocol      int      `json:"protocol"`
+	Session       string   `json:"session"`
+	UpdateControl int      `json:"update_control"`
+	Host          HostInfo `json:"host"`
 }
 
 type LiveMetrics struct {

@@ -17,6 +17,19 @@ import (
 	"spiderwatch/client/internal/agent"
 )
 
+func TestRequestedUpdateRequiresInstalledBridgeAndExclusiveMode(t *testing.T) {
+	for _, args := range [][]string{
+		{"update", "--requested", "--check"},
+		{"update", "--requested", "--automatic"},
+		{"update", "--requested", "--config", filepath.Join(t.TempDir(), "config.json")},
+	} {
+		var out, errOut bytes.Buffer
+		if err := execute(context.Background(), args, &out, &errOut); err == nil {
+			t.Fatalf("accepted uninstalled or conflicting requested update mode: %v", args)
+		}
+	}
+}
+
 func TestInvitationJoinsExistingPendingIdentityWithoutAnotherApproval(t *testing.T) {
 	t.Setenv("CF_ACCESS_CLIENT_ID", "")
 	t.Setenv("CF_ACCESS_CLIENT_SECRET", "")

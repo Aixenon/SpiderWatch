@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
-import { api, lists, notify, state, type Node } from "../monitor";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { api, lists, loadState, notify, state, type Node } from "../monitor";
+import { hasSession, onSessionInvalidated, sessionGeneration } from "../session";
+import { createDeviceUpdate } from "../device-update";
 import { groupLabel, statusLabel } from "../format";
 import { normalizeDeviceIcon } from "../../../public/device-icons.js";
 import DeviceIconPicker from "./DeviceIconPicker.vue";
@@ -13,8 +15,22 @@ const deleting = computed(() => state.nodes.find(node => node.node_id === deleti
 const canDelete = computed(() => !!deleting.value && deleteName.value === deleting.value.name);
 watch(() => deleting.value?.name, () => { deleteName.value = ""; deleteError.value = ""; if (!deleting.value) deleteDialog.value?.close(); });
 const configDialog = ref<HTMLDialogElement>(), configuring = ref<Node>(), nickname = ref(""), configGroup = ref(""), configError = ref(""), configIcon = ref("server");
-const configAutoUpdate = ref(false), updateMessage = ref("");
-const configBusy = ref(false), deleteBusy = ref(false), updateBusy = ref(false);
+const configAutoUpdate = ref(false);
+const configBusy = ref(false), deleteBusy = ref(false);
+const update = createDeviceUpdate({
+  start: api.checkUpdate, status: api.updateStatus,
+  current: id => !!configDialog.value?.open && configuring.value?.node_id === id && state.nodes.some(node => node.node_id === id && node.state === "approved"),
+  generation: sessionGeneration, authorized: hasSession, visible: () => !document.hidden,
+  installed: () => { void loadState(true); },
+});
+const updateState = update.state, updateBusy = update.busy, updateMessage = update.message, updateFailed = update.failed, updateRemaining = update.remaining;
+function clearConfig() { update.close(); configuring.value = undefined; }
+watch(() => configuring.value && state.nodes.find(node => node.node_id === configuring.value?.node_id)?.state, membership => {
+  if (configuring.value && membership !== "approved") { configDialog.value?.close(); clearConfig(); }
+}, { flush: "sync" });
+const removeSessionListener = onSessionInvalidated(() => { configDialog.value?.close(); clearConfig(); });
+document.addEventListener("visibilitychange", update.visibilityChanged);
+onBeforeUnmount(() => { update.close(); removeSessionListener(); document.removeEventListener("visibilitychange", update.visibilityChanged); });
 const filtered = computed(() => state.nodes.filter(n => {
   const f = filters, q = f.query.trim().toLowerCase();
   return (!q || `${n.name} ${n.node_id} ${n.host.hostname}`.toLowerCase().includes(q))
@@ -31,7 +47,7 @@ watch(() => state.groups.map(group => group.id), ids => {
 });
 function askDelete(node: Node) { deletingId.value = node.node_id; deleteName.value = ""; deleteError.value = ""; deleteDialog.value?.showModal(); }
 function clearDelete() { deletingId.value = ""; deleteName.value = ""; deleteError.value = ""; }
-function askConfig(node: Node) { configuring.value = node; configAutoUpdate.value = node.auto_update; updateMessage.value = ""; nickname.value = node.nickname; configGroup.value = node.group_id || ""; configIcon.value = normalizeDeviceIcon(node.icon); configError.value = ""; configDialog.value?.showModal(); }
+function askConfig(node: Node) { configuring.value = node; configAutoUpdate.value = node.auto_update; nickname.value = node.nickname; configGroup.value = node.group_id || ""; configIcon.value = normalizeDeviceIcon(node.icon); configError.value = ""; configDialog.value?.showModal(); void update.open(node.node_id); }
 async function saveConfig() {
   if (!configuring.value || configBusy.value) return;
   configBusy.value = true; configError.value = "";
@@ -47,19 +63,7 @@ async function remove() {
   catch (error) { deleteError.value = (error as Error).message; }
   finally { deleteBusy.value = false; }
 }
-async function checkUpdate() {
-  const id = configuring.value?.node_id;
-  if (!id || updateBusy.value || configBusy.value) return;
-  updateBusy.value = true; updateMessage.value = "正在检查…";
-  try {
-    const result = await api.checkUpdate(id);
-    if (!configDialog.value?.open || configuring.value?.node_id !== id) return;
-    updateMessage.value = result.available === true ? `可更新至 ${result.version}，在设备上执行 spider-watch --update。`
-      : result.available === false ? "当前已是最新版本。" : `可用版本 ${result.version}，设备当前版本未知。`;
-  } catch (error) {
-    if (configDialog.value?.open && configuring.value?.node_id === id) updateMessage.value = (error as Error).message;
-  } finally { updateBusy.value = false; }
-}
+function checkUpdate() { if (!configBusy.value) void update.start(); }
 function openConfig(id: string) { const node = state.nodes.find(n => n.node_id === id && n.state === "approved"); if (node) askConfig(node); }
 defineExpose({ openConfig });
 function clearFilters() { Object.assign(filters, { query: "", group: "all", status: "all", page: 1 }); }
@@ -87,15 +91,16 @@ function clearFilters() { Object.assign(filters, { query: "", group: "all", stat
       <div v-if="!rows.length" class="empty-state"><h3>没有符合条件的设备</h3><p>试试其他名称、分组或状态。</p><button class="secondary small" @click="clearFilters">清除筛选</button></div>
     </div>
     <div class="pagination"><span>共 {{ filtered.length }} 台<span v-if="filtered.length"> · 显示 {{ (filters.page - 1) * filters.size + 1 }}–{{ Math.min(filters.page * filters.size, filtered.length) }}</span></span><div><label>每页 <select v-model.number="filters.size" aria-label="每页设备数"><option :value="25">25</option><option :value="50">50</option><option :value="100">100</option></select></label><button class="secondary small" :disabled="filters.page <= 1" @click="filters.page--">上一页</button><span class="page-number">{{ filters.page }} / {{ pages }}</span><button class="secondary small" :disabled="filters.page >= pages" @click="filters.page++">下一页</button></div></div>
-    <dialog ref="configDialog" class="dialog device-config" aria-labelledby="device-config-heading" @cancel="event => { if (configBusy) event.preventDefault(); }" @close="configuring = undefined">
+    <dialog ref="configDialog" class="dialog device-config" aria-labelledby="device-config-heading" @cancel="event => { if (configBusy) event.preventDefault(); }" @close="clearConfig">
       <div class="device-config-scroll">
       <div class="dialog-heading"><h2 id="device-config-heading">设备配置</h2><button type="button" class="button-quiet" aria-label="关闭设备配置" :disabled="configBusy" @click="configDialog?.close()">✕</button></div>
       <dl class="info-list"><div><dt>设备 ID</dt><dd class="long-id"><code>{{ configuring?.node_id }}</code></dd></div><div><dt>客户端版本</dt><dd>{{ configuring?.host.agent_version || '未知' }}</dd></div></dl>
       <form id="device-config-form" class="device-config-fields" @submit.prevent="saveConfig">
         <label for="device-nickname">名字<input id="device-nickname" v-model="nickname" maxlength="128" autofocus :placeholder="configuring?.host.hostname" :disabled="configBusy" /></label>
         <label for="device-group">所属分组<select id="device-group" v-model="configGroup" :disabled="configBusy"><option value="">未分组</option><option v-for="group in state.groups" :key="group.id" :value="group.id">{{ group.name }}</option></select></label>
-        <div class="device-update-row"><label class="update-toggle"><input v-model="configAutoUpdate" type="checkbox" :disabled="configBusy" @change="updateMessage = ''" />自动更新</label><button v-if="!configAutoUpdate" type="button" class="secondary small" :disabled="configBusy || updateBusy" @click="checkUpdate">{{ updateBusy ? '检查中…' : '检查更新' }}</button></div>
-        <p v-if="updateMessage" class="hint" role="status">{{ updateMessage }}</p>
+        <div class="device-update-row"><label class="update-toggle"><input v-model="configAutoUpdate" type="checkbox" :disabled="configBusy" />自动更新</label><button type="button" class="secondary small" :disabled="configBusy || updateBusy" @click="checkUpdate">检查更新</button></div>
+        <p v-if="updateMessage" :class="updateFailed ? 'form-error' : 'hint'" role="status">{{ updateMessage }}<span v-if="updateRemaining"> · 剩余 {{ updateRemaining }}</span></p>
+        <p v-if="updateState.error" class="form-error" role="alert">{{ updateState.error }}</p>
         <DeviceIconPicker v-model="configIcon" :disabled="configBusy" />
         <p v-if="configError" class="form-error" role="alert">{{ configError }}</p>
       </form>
