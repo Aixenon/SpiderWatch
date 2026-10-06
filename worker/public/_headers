@@ -1,6 +1,0 @@
-/*
-  Cache-Control: no-store
-  X-Content-Type-Options: nosniff
-  Referrer-Policy: same-origin
-  X-Frame-Options: DENY
-  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'

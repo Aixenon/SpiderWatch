@@ -162,8 +162,8 @@ test('uses explicit source URL switches and defaults omitted switches to disable
   }
 });
 
-function fakeDeployment({ secrets = [{ name: 'INVITATION_SECRET' }, { name: 'SESSION_SECRET' }], exists = true, workersDev = false, previews = false, status = 0, error, authError = false, apiStatus = 200 } = {}) {
-  const calls = [], uploads = [], logs = [];
+function fakeDeployment({ secrets = [{ name: 'INVITATION_SECRET' }, { name: 'SESSION_SECRET' }], exists = true, workersDev = false, previews = false, status = 0, error, authError = false, apiStatus = 200, panelStatus = 0 } = {}) {
+  const calls = [], uploads = [], logs = [], panelBuilds = [];
   mock.method(console, 'log', value => logs.push(String(value)));
   mock.method(childProcess, 'execFileSync', (command, args) => {
     calls.push([command, args]);
@@ -180,6 +180,10 @@ function fakeDeployment({ secrets = [{ name: 'INVITATION_SECRET' }, { name: 'SES
     return url.endsWith('/secrets') ? success(secrets) : success({ enabled: workersDev, previews_enabled: previews });
   });
   const deploy = mock.method(childProcess, 'spawnSync', (_command, args) => {
+    if (args[0].includes('vue-tsc') || args[0].endsWith('vite.js')) {
+      panelBuilds.push(args);
+      return { status: panelStatus };
+    }
     assert.equal(args[1], 'deploy');
     assert.ok(args.includes('--keep-vars'));
     const configFile = args[args.indexOf('--config') + 1];
@@ -189,13 +193,15 @@ function fakeDeployment({ secrets = [{ name: 'INVITATION_SECRET' }, { name: 'SES
     return { status, error };
   });
   syncBuiltinESMExports();
-  return { calls, uploads, logs, request, deploy };
+  return { calls, uploads, logs, request, deploy, panelBuilds };
 }
 
 test('redeployment keeps existing credentials and removes only its temporary deployment directory', async () => {
   const fixture = fakeDeployment();
   await main([], { GITHUB_REPOSITORY: 'fixture/SpiderWatch' });
   assert.equal(fixture.uploads.length, 1);
+  assert.equal(fixture.panelBuilds.length, 2);
+  assert.equal(fixture.uploads[0].config.assets.directory, resolve(root, 'dist/panel'));
   const upload = fixture.uploads[0];
   assert.equal(upload.secrets, undefined);
   assert.equal(upload.config.account_id, account);
@@ -295,4 +301,11 @@ test('rejects unsupported arguments and invalid names before any deployment', as
   await assert.rejects(main([], { WORKER_NAME: '../other-worker' }), /Invalid WORKER_NAME/);
   assert.equal(globalThis.fetch.mock.callCount(), 0);
   assert.equal(childProcess.spawnSync.mock.callCount(), 0);
+});
+
+test('a failed panel build cannot publish stale assets', async () => {
+  const fixture = fakeDeployment({ panelStatus: 1 });
+  await assert.rejects(main(['--dry-run'], { GITHUB_REPOSITORY: 'fixture/SpiderWatch' }), /Panel type check failed/);
+  assert.equal(fixture.uploads.length, 0);
+  assert.equal(fixture.request.mock.callCount(), 0);
 });

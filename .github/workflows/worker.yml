@@ -14,11 +14,15 @@ jobs:
         with:
           node-version: '22'
           cache: npm
-          cache-dependency-path: worker/package-lock.json
+          cache-dependency-path: |
+            package-lock.json
+            worker/package-lock.json
+            worker/ui/package-lock.json
       - run: npm ci
         working-directory: .
       - run: npm run types
       - run: npm run check
+      - run: npm run test:ui
       - run: npm run test:deploy
       - run: npm test
       - run: npm run build

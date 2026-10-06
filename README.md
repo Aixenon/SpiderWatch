@@ -2,6 +2,8 @@
 
 Cloudflare Workers + SQLite Durable Objects 网络监控面板，配套单文件客户端 `spider-watch`。前端随 Worker 一起部署，无需单独部署 Pages、数据库或 R2。
 
+面板使用 Vue 3，源码在 `worker/ui`。部署命令会自动检查并构建同一套界面；本地预览可运行 `npm --prefix worker run dev`，打开终端显示的本地地址。本地数据与线上数据独立。
+
 ## 部署到 Cloudflare
 
 需要一个 Cloudflare 账户、托管在该账户下的域名和包含本项目完整源码的 GitHub 仓库。通过 Cloudflare Workers Builds 连接仓库即可部署；面板使用 GitHub 登录，无需开通 Zero Trust。默认使用自定义域名，关闭 `workers.dev` 和预览地址。

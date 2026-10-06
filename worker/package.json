@@ -4,15 +4,19 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev --env local --ip 127.0.0.1",
+    "dev": "npm run build:ui && wrangler dev --env local --ip 127.0.0.1",
     "types": "wrangler types --strict-vars=false",
-    "check": "tsc --noEmit",
+    "check": "tsc --noEmit && npm --prefix ui run check",
     "test": "vitest run",
     "test:deploy": "node --test scripts/deploy.test.mjs",
-    "build": "wrangler deploy --dry-run --outdir dist",
+    "build": "npm run build:ui && wrangler deploy --dry-run --outdir dist",
     "deploy": "node scripts/deploy.mjs",
-    "preview": "wrangler preview",
-    "setup": "node scripts/deploy.mjs"
+    "preview": "npm run build:ui && wrangler preview",
+    "setup": "node scripts/deploy.mjs",
+    "postinstall": "npm --prefix ui ci --no-audit --no-fund",
+    "build:ui": "npm --prefix ui run build",
+    "pretest": "npm run build:ui",
+    "test:ui": "vitest run --config ui/vitest.config.ts"
   },
   "dependencies": {
     "jose": "6.2.12"

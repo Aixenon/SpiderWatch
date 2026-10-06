@@ -145,6 +145,11 @@ export async function main(args = process.argv.slice(2), env = process.env) {
       : wranglerJSON(['auth', 'token']);
     state = await readDeployment(account, name, credential);
   }
+  // Build the same panel for local previews and every production deployment.
+  const panelBuild = spawnSync(process.execPath, [resolve(root, 'ui/node_modules/vue-tsc/bin/vue-tsc.js'), '--noEmit'], { cwd: resolve(root, 'ui'), stdio: 'inherit', env });
+  if (panelBuild.error || panelBuild.status !== 0) throw new Error('Panel type check failed.');
+  const panelBundle = spawnSync(process.execPath, [resolve(root, 'ui/node_modules/vite/bin/vite.js'), 'build'], { cwd: resolve(root, 'ui'), stdio: 'inherit', env });
+  if (panelBundle.error || panelBundle.status !== 0) throw new Error('Panel build failed.');
   const config = deploymentConfig(source, { name, repository, account });
   const invitation = invitationFor(state, env.INVITATION_SECRET);
   const session = sessionFor(state, env.SESSION_SECRET);
