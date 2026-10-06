@@ -1,0 +1,36 @@
+name: Deploy SpiderWatch to Cloudflare
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: spider-watch-production
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    defaults:
+      run:
+        working-directory: worker
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      INVITATION_SECRET: ${{ secrets.INVITATION_SECRET }}
+      PANEL_DOMAIN: ${{ vars.PANEL_DOMAIN }}
+      ACCESS_TEAM_DOMAIN: ${{ vars.ACCESS_TEAM_DOMAIN }}
+      ACCESS_PANEL_AUD: ${{ vars.ACCESS_PANEL_AUD }}
+      ADMIN_EMAILS: ${{ vars.ADMIN_EMAILS }}
+      WORKER_NAME: ${{ vars.WORKER_NAME }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - name: Deploy panel, Worker and Durable Object together
+        run: npm run deploy

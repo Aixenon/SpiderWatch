@@ -1,0 +1,12 @@
+* text=auto eol=lf
+*.cmd text eol=crlf
+
+# Keep local-only files out of git archive even if accidentally tracked.
+.local-dev export-ignore
+frontend export-ignore
+net_sources export-ignore
+.tools export-ignore
+.cache export-ignore
+dist export-ignore
+client/dist export-ignore
+worker/dist export-ignore

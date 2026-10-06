@@ -1,0 +1,12 @@
+export type PhysicalDisk = {id:string;name:string;size_bytes?:number};
+export type Volume = {mount:string;volume_id?:string;device?:string;label?:string;filesystem?:string;capacity_group?:string;pool_total_bytes?:number;pool_available_bytes?:number;mount_count?:number;physical_disks?:PhysicalDisk[];total_bytes:number;used_bytes:number;available_bytes?:number};
+export type DiskSummary = {total_bytes:number;used_bytes:number|null};
+export type DiskGroup = {id:string;name:string;kind:'physical'|'unmapped';size_bytes?:number;volumes:Volume[];summary:DiskSummary|null};
+export type Memory = {total_bytes:number;used_bytes:number;available_bytes?:number;free_bytes?:number;cached_bytes?:number;buffers_bytes?:number;swap_supported?:boolean;swap_used_bytes?:number;swap_total_bytes?:number;committed_bytes?:number;commit_limit_bytes?:number;active_bytes?:number;inactive_bytes?:number;wired_bytes?:number};
+export type CPUDetail = {user_percent?:number;system_percent?:number;idle_percent?:number;iowait_percent?:number;steal_percent?:number};
+export function volumes(metrics?: {disks?:Volume[]}): Volume[];
+export function diskSummary(metrics?: {disks?:Volume[]}): DiskSummary|null;
+export function diskGroups(metrics?: {disks?:Volume[]}): DiskGroup[];
+export function volumeName(disk:Volume):string;
+export function memoryDetails(memory?:Memory):{label:string;value?:number;total?:number}[];
+export function cpuDetails(metrics?:{cpu_percent?:number;cpu_detail?:CPUDetail}):{label:string;value?:number}[];

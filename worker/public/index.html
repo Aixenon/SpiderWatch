@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>SpiderWatch</title><link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2032%2032%22%3E%3Crect%20width%3D%2232%22%20height%3D%2232%22%20rx%3D%228%22%20fill%3D%22%2327272a%22%2F%3E%3Cpath%20d%3D%22M16%203v26M3%2016h26M6.5%206.5l19%2019M25.5%206.5l-19%2019M16%204Q18%208%2024.5%207.5Q24%2014%2028%2016Q24%2018%2024.5%2024.5Q18%2024%2016%2028Q14%2024%207.5%2024.5Q8%2018%204%2016Q8%2014%207.5%207.5Q14%208%2016%204ZM16%2010Q17%2012%2020.2%2011.8Q20%2015%2022%2016Q20%2017%2020.2%2020.2Q17%2020%2016%2022Q15%2020%2011.8%2020.2Q12%2017%2010%2016Q12%2015%2011.8%2011.8Q15%2012%2016%2010Z%22%20fill%3D%22none%22%20stroke%3D%22%23e4e4e7%22%20stroke-width%3D%221.5%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%2F%3E%3C%2Fsvg%3E"><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/theme.css"><link rel="stylesheet" href="/resource-detail.css"><script src="/theme.js" defer></script><script src="/app.js" type="module"></script>
+</head>
+<body>
+  <main>
+    <header><div><h1 class="brand-heading"><svg viewBox="0 0 32 32" aria-hidden="true" style="stroke-width:1.5"><path d="M16 3v26M3 16h26M6.5 6.5l19 19M25.5 6.5l-19 19M16 4Q18 8 24.5 7.5Q24 14 28 16Q24 18 24.5 24.5Q18 24 16 28Q14 24 7.5 24.5Q8 18 4 16Q8 14 7.5 7.5Q14 8 16 4ZM16 10Q17 12 20.2 11.8Q20 15 22 16Q20 17 20.2 20.2Q17 20 16 22Q15 20 11.8 20.2Q12 17 10 16Q12 15 11.8 11.8Q15 12 16 10Z" /></svg><span class="brand-wordmark"><span class="brand-name">SpiderWatch</span><small class="brand-tagline" aria-label="Network Monitor"><span aria-hidden="true">N</span><span aria-hidden="true">E</span><span aria-hidden="true">T</span><span aria-hidden="true">W</span><span aria-hidden="true">O</span><span aria-hidden="true">R</span><span aria-hidden="true">K</span><span aria-hidden="true">&nbsp;</span><span aria-hidden="true">M</span><span aria-hidden="true">O</span><span aria-hidden="true">N</span><span aria-hidden="true">I</span><span aria-hidden="true">T</span><span aria-hidden="true">O</span><span aria-hidden="true">R</span></small></span></h1><p id="group">正在载入</p></div><div class="connection"><span id="live-dot"></span><span id="connection">正在连接</span><button id="toggle-theme" class="secondary" type="button">☀ 浅色</button><span id="session-user" class="session-user" hidden></span><button id="refresh" class="secondary" disabled>刷新</button><button id="logout" class="secondary" type="button" hidden>退出</button></div></header>
+    <p id="notice" role="status" aria-live="polite" hidden></p>
+    <section id="login-panel" class="card login-panel" aria-labelledby="login-title">
+      <h2 id="login-title">正在验证登录</h2><p id="login-description">请稍候。</p>
+      <a id="login-link" class="login-button" href="/auth/login" hidden>使用 Cloudflare 登录</a>
+    </section>
+    <div id="panel-content" hidden>
+    <nav class="main-nav" aria-label="主导航"><button type="button" data-page="overview" aria-current="page">总览</button><button type="button" data-page="manage">管理</button><button type="button" data-page="settings">设置</button></nav>
+    <div id="overview-page">
+      <div class="overview-filter"><label>查看分组<select id="overview-group-filter" aria-label="总览分组"><option value="all">全部设备</option><option value="ungrouped">未分组</option></select></label></div>
+      <section id="node-panels" class="node-panels" aria-label="设备状态"></section>
+      <p id="overview-empty" class="empty-state" hidden>暂无已加入设备。</p>
+    </div>
+    <div id="detail-page" hidden aria-label="设备详情"></div>
+    <div id="manage-page" hidden>
+    <section id="device-card" class="card">
+      <div class="section-top"><h2>设备管理</h2><div class="device-management-actions"><button id="manage-groups" type="button" class="secondary">管理分组</button><button id="add-device" type="button" disabled>添加设备</button></div></div>
+      <div class="controls">
+        <label>搜索设备<input id="device-search" type="search" placeholder="名称、设备 ID 或主机名"></label>
+        <label>查看分组<select id="group-filter" aria-label="查看分组"><option value="all">全部设备</option><option value="ungrouped">未分组</option></select></label>
+      </div>
+      <div class="table-wrap"><table><thead><tr><th>设备 / 平台</th><th>分组</th><th>状态</th><th>CPU</th><th>内存</th><th>磁盘</th><th>网络接收 / 发送</th><th>客户端内存</th><th>最后收到</th><th>操作</th></tr></thead><tbody id="nodes"></tbody></table></div>
+      <p id="empty">暂无设备，请先添加设备。</p>
+    </section>
+    </div>
+    <div id="settings-page" hidden>
+    <div class="settings-overview">
+      <section class="card interval-panel" aria-labelledby="interval-heading">
+        <div class="section-top"><h2 id="interval-heading">更新间隔</h2></div>
+        <form id="settings-form" class="interval-controls">
+          <label>面板开启<span class="interval-input"><input id="active" name="active" type="number" min="2" max="300" step="1" value="5" required aria-label="面板开启（秒）"><span aria-hidden="true">秒</span></span></label>
+          <label>面板关闭<span class="interval-input"><select id="idle" name="idle" required aria-label="面板关闭"><option value="120">2 分钟</option><option value="300">5 分钟</option><option value="600" selected>10 分钟</option></select></span></label>
+          <button type="submit" id="save">保存</button>
+        </form>
+      </section>
+      <section class="card network-panel" aria-labelledby="network-heading">
+        <div class="section-top"><h2 id="network-heading">网络信息</h2></div>
+        <dl class="network-facts"><div><dt>网络代码</dt><dd><code id="network-code">—</code></dd></div><div><dt>设备总数</dt><dd><span id="network-device-count">—</span><span class="unit">台</span></dd></div></dl>
+      </section>
+    </div>
+    <section class="card quota-panel" aria-labelledby="quota-heading">
+      <div class="section-top"><h2 id="quota-heading">实时额度</h2><span id="quota-status" class="badge">正在读取</span></div>
+      <div class="quota-meta"><span id="quota-day">今日 · UTC</span><span id="quota-updated">—</span></div>
+      <div class="table-wrap"><table class="quota-table"><thead><tr><th>项目</th><th>已使用</th><th>免费额度</th><th>使用比例</th></tr></thead><tbody id="quota"></tbody></table></div>
+      <p id="quota-message" class="hint" role="status"></p>
+    </section>
+    </div>
+    </div>
+  </main>
+  <dialog id="device-join" aria-labelledby="device-join-title">
+    <div class="section-top"><h2 id="device-join-title">添加设备</h2><button id="close-join" type="button" class="secondary" aria-label="关闭添加设备">关闭</button></div>
+    <p class="hint">在设备上执行指令即可加入。有效 5 分钟，仅限一台设备。</p>
+    <div class="join-code"><code id="join-command">正在生成指令…</code></div>
+    <p class="hint join-status"><span id="join-remaining"></span><span id="join-status" role="status"></span></p>
+    <p id="join-notice" role="status" aria-live="polite" hidden></p>
+    <div class="dialog-actions"><button id="copy-join" type="button" class="secondary" disabled>复制</button><button id="check-join" type="button">检查</button></div>
+  </dialog>
+  <dialog id="node-config" aria-labelledby="node-config-title">
+    <form id="node-config-form">
+      <div class="section-top"><div><h2 id="node-config-title">配置设备</h2><p id="config-identity"></p></div><button id="close-config" type="button" class="secondary" aria-label="关闭配置">关闭</button></div>
+      <label>名字<input id="config-name" maxlength="128"></label>
+      <p id="config-agent-version" class="hint"></p>
+      <label>所属分组<select id="config-group" aria-label="设备分组"><option value="">未分组</option></select></label>
+      <div class="device-update-row"><label class="update-toggle"><input id="config-auto-update" type="checkbox">自动更新</label><button id="check-node-update" type="button" class="secondary">检查更新</button></div>
+      <p id="node-update-notice" class="hint" role="status" hidden></p>
+      <fieldset class="icon-field"><legend>设备图标</legend><div id="config-icons" class="icon-picker" aria-label="设备图标"></div></fieldset>
+      <p id="config-notice" role="status" aria-live="polite" hidden></p>
+      <div class="dialog-actions"><button id="cancel-config" type="button" class="secondary">取消</button><button id="save-config" type="submit">保存配置</button></div>
+    </form>
+  </dialog>
+  <dialog id="node-delete" aria-labelledby="node-delete-title" aria-describedby="delete-effect">
+    <form id="node-delete-form">
+      <h2 id="node-delete-title">删除设备</h2>
+      <p id="delete-effect" class="hint"></p>
+      <p class="delete-device-identity"><strong id="delete-device-name"></strong><small id="delete-device-id"></small></p>
+      <label>输入设备名称<input id="delete-name" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="delete-match" autofocus></label>
+      <p id="delete-match" class="hint">名称须完全一致，包括大小写。</p>
+      <p id="delete-notice" class="error" role="alert" hidden></p>
+      <div class="dialog-actions"><button id="cancel-delete" type="button" class="secondary">取消</button><button id="confirm-delete" type="submit" class="danger" disabled>确认删除</button></div>
+    </form>
+  </dialog>
+  <dialog id="group-manager" aria-labelledby="group-manager-title">
+    <div class="section-top"><div><h2 id="group-manager-title">管理分组</h2></div><button id="close-groups" type="button" class="secondary" aria-label="关闭分组管理">关闭</button></div>
+    <form id="create-group-form" class="controls"><label>新分组名称<input id="new-group" maxlength="64" placeholder="例如：家用设备" required></label><button id="create-group" type="submit">创建分组</button></form>
+    <div id="group-list" class="group-list"></div>
+    <p id="groups-empty" class="hint" hidden>暂无分组。</p>
+
+    <p id="group-notice" role="status" aria-live="polite" hidden></p>
+  </dialog>
+</body>
+</html>

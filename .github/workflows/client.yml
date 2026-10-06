@@ -1,0 +1,165 @@
+name: SpiderWatch builds
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  GOEXPERIMENT: nojsonv2
+jobs:
+  matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      targets: ${{ steps.targets.outputs.matrix }}
+      version: ${{ steps.targets.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: targets
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          echo "matrix=$(python3 client/scripts/build.py --matrix)" >> "$GITHUB_OUTPUT"
+          if [ "$REF_TYPE" = tag ]; then
+            version=$(python3 client/scripts/publish_github_release.py --validate-tag "$REF_NAME")
+          else
+            version=0.7.0-dev
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: client/go.mod
+          cache-dependency-path: client/go.sum
+      - run: go test ./...
+        working-directory: client
+      - run: go vet ./...
+        working-directory: client
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python -m unittest discover -s client/scripts -p "test_*.py" -v
+      - if: runner.os != 'Windows'
+        run: sh -n client/scripts/install.sh
+  build:
+    needs: matrix
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.targets) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: client/go.mod
+          cache-dependency-path: client/go.sum
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.matrix.outputs.version }}
+        run: python3 client/scripts/build.py --target "$TARGET" --version "$VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: client/dist/*
+          if-no-files-found: error
+          retention-days: 7
+  windows-installer:
+    needs: [matrix, build]
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64, '386']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: binary-windows-${{ matrix.arch }}
+          path: client/dist
+      - name: Build standard installer with uninstaller
+        env:
+          VERSION: ${{ needs.matrix.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        shell: pwsh
+        run: |
+          $compiler = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6/ISCC.exe'
+          if (!(Test-Path -LiteralPath $compiler)) { throw 'Inno Setup 6 is required on this runner' }
+          & $compiler "/DVersion=$env:VERSION" "/DArch=$env:ARCH" "/DBuildDir=$((Resolve-Path client/dist).Path)" client/scripts/windows/setup.iss
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Verify install, service and uninstall on disposable runner
+        if: matrix.arch == 'amd64'
+        shell: pwsh
+        run: ./client/scripts/windows/test-installer.ps1 -Installer client/dist/spider-watch-windows-amd64-setup.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-${{ matrix.arch }}
+          path: client/dist/*-setup.exe
+          if-no-files-found: error
+          retention-days: 7
+  assemble:
+    needs: [matrix, check, build, windows-installer]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: binary-*
+          path: client/dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: installer-*
+          path: client/dist
+          merge-multiple: true
+      - env:
+          VERSION: ${{ needs.matrix.outputs.version }}
+        run: |
+          python3 client/scripts/build.py --assemble --installers --version "$VERSION"
+          python3 client/scripts/verify_builds.py --release-dir client/dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spider-watch-release
+          path: |
+            client/dist/spider-watch-*
+            client/dist/install.*
+            client/dist/update-manifest.json
+            client/dist/checksums.txt
+            client/dist/release-info.json
+          if-no-files-found: error
+          retention-days: 7
+  release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: assemble
+    runs-on: ubuntu-latest
+    concurrency:
+      group: spider-watch-release-${{ github.ref }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/download-artifact@v4
+        with:
+          name: spider-watch-release
+          path: client/dist
+      - name: Verify draft assets before publishing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python3 client/scripts/publish_github_release.py --tag "$RELEASE_TAG" --directory client/dist

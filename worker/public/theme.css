@@ -1,0 +1,13 @@
+:root[data-theme=light]{color-scheme:light;--bg:#f4f6fb;--card:#fff;--line:#d5deed;--ink:#22324f;--muted:#5b6b85;--accent:#1e40af;--action:#1e40af;--warn:#956013}
+:root[data-theme=light] input,:root[data-theme=light] select,:root[data-theme=light] pre,:root[data-theme=light] .join-code{background:#f1f6f9;color:var(--ink);border-color:#bfced9}
+:root[data-theme=light] button{color:#fff}
+:root[data-theme=light] button.secondary{color:var(--ink);border-color:#b7cad5}
+:root[data-theme=light] button.danger{color:#963e2c;border-color:#d8aa9e;background:transparent}
+:root[data-theme=light] tbody tr:hover{background:#f3f8fa}
+:root[data-theme=light] .badge,:root[data-theme=light] .batch-actions{background:#eaf3f6;color:var(--ink)}
+:root[data-theme=light] #notice{background:#eaf0ff;color:#234686}
+:root[data-theme=light] .main-nav button{color:var(--muted)}
+:root[data-theme=light] .main-nav button[aria-current=page]{color:var(--ink)}
+:root[data-theme=light] .brand-heading svg{stroke:#3f3f46}
+
+:root[data-theme=light] .icon-option{color:var(--muted)}:root[data-theme=light] .icon-option[aria-pressed=true]{color:var(--accent)}

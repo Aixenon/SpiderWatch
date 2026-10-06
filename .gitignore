@@ -1,0 +1,45 @@
+# Local development files.
+/.local-dev/
+/frontend/
+/net_sources/
+/preview.cmd
+/preview.ps1
+/.tools/
+/.cache/
+# Dependencies, build products and runtime state.
+node_modules/
+dist/
+build/
+coverage/
+.wrangler/
+.tmp/
+__pycache__/
+*.pyc
+*.exe
+*.test
+*.tsbuildinfo
+*.log
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.db
+*.db-*
+/worker/public/agent-releases/
+# Local credentials and deployment overrides.
+.env
+.env.*
+!.env.example
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+*.local.json
+*.local.jsonc
+config.json
+access.json
+join-ticket.txt
+run.lock
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt

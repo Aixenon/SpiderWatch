@@ -1,0 +1,3 @@
+# Agent binaries are fetched by the Worker from fixed GitHub Releases on demand.
+# Keep local binaries out of static assets.
+/agent-releases/**
