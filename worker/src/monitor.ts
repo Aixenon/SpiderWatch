@@ -582,13 +582,14 @@ export class MonitorGroup extends DurableObject<Env> {
     const started = Date.now(), url = new URL(request.url);
     const writesBefore = this.counter().sql_written;
     let fallbackSaved = false;
+    let upgraded = false;
     const admin = request.headers.get("X-Monitor-Role") === "admin";
     const authExpires = Number(request.headers.get("X-Monitor-Auth-Expires"));
-    if (!Number.isFinite(authExpires) || authExpires <= started) return json({ code: "session_expired" }, 401);
     const upgrade = request.headers.get("Upgrade")?.toLowerCase() === "websocket";
     if (!upgrade) this.counter().http_requests++;
     this.duration.begin(started);
     try {
+      if (!Number.isFinite(authExpires) || authExpires <= started) return json({ code: "session_expired" }, 401);
       if (request.headers.get("X-Monitor-Role") === "updates") {
         if (url.hostname !== "do") return json({code:"not_found"},404);
         const original = request.headers.get("X-Monitor-Original-URL");
@@ -634,7 +635,11 @@ export class MonitorGroup extends DurableObject<Env> {
         return json({ state: "approved", transport: "websocket", interval_seconds: this.settings.idle_seconds,
           access: local ? undefined : { client_id: this.env.AGENT_ACCESS_CLIENT_ID, client_secret: this.env.AGENT_ACCESS_CLIENT_SECRET } });
       }
-      if (admin) return await this.admin(request, url, authExpires);
+      if (admin) {
+        const response = await this.admin(request, url, authExpires);
+        upgraded = response.status === 101;
+        return response;
+      }
       if (url.pathname === "/v1/enroll" && request.method === "POST") return await this.enroll(request);
       const metricsRequest = url.pathname === "/v1/metrics" && request.method === "POST";
       const device = await this.authenticateDevice(request, metricsRequest);
@@ -675,6 +680,7 @@ export class MonitorGroup extends DurableObject<Env> {
         a.savedAt = device.last_seen || undefined;
         a.pending.connections++;
         this.ctx.acceptWebSocket(pair[1], ["agent"]); pair[1].serializeAttachment(a);
+        upgraded = true;
         this.configureAgent(pair[1], this.viewing(), true); await this.ensureAlarm();
         return new Response(null, { status: 101, webSocket: pair[0] });
       }
@@ -684,10 +690,14 @@ export class MonitorGroup extends DurableObject<Env> {
       if (error instanceof SyntaxError) return json({ code: "invalid_json" }, 400);
       throw error;
     } finally {
+      // Rejected upgrades are still HTTP invocations in Cloudflare Analytics.
+      // Successful upgrades are already counted once in connections.
+      if (upgrade && !upgraded) this.counter().http_requests++;
       if (!fallbackSaved) this.duration.end();
       // Keep event counters in a live attachment when available. HTTP-only
       // fallback needs a durable checkpoint before the object can sleep.
-      // Ordinary read-only polling keeps the existing five-minute estimate.
+      // Without a live attachment, persist before hibernation so rejected
+      // handshakes and read-only HTTP requests do not disappear on the next wake.
       const fallback = url.pathname === "/v1/metrics";
       const changesState = !["GET", "HEAD"].includes(request.method) && url.pathname !== "/bootstrap/status" && !fallback;
       const changed = !fallbackSaved && this.counter().sql_written > writesBefore;
@@ -695,7 +705,7 @@ export class MonitorGroup extends DurableObject<Env> {
         // Only a newly scheduled alarm (or concurrent work) can remain after
         // the report journal. Ordinary HTTP reports need no second write.
         if (this.pending.size) this.flushUsage();
-      } else if ((fallback && changed && !this.sockets().length) || (changesState && changed) || Date.now() - this.runtime.checkpoint >= CHECKPOINT_MS) this.flushUsage();
+      } else if (!this.sockets().length || (changesState && changed) || Date.now() - this.runtime.checkpoint >= CHECKPOINT_MS) this.flushUsage();
       else this.stashPendingCounters();
     }
   }
@@ -1048,13 +1058,13 @@ export class MonitorGroup extends DurableObject<Env> {
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
     const started = Date.now(), a = this.attachment(ws); if (!a || a.closed) { ws.close(1008, "invalid connection"); return; }
-    if (a.authExpires <= started) { this.send(ws, {type: "session_expired"}); ws.close(1008, "Session expired"); return; }
     if (a.epoch !== this.runtime.epoch) { a.epoch = this.runtime.epoch; a.pending = emptyCounts(); }
     if (a.hour !== hourOf(started)) { this.flushUsage(started); Object.assign(a, this.attachment(ws)); a.hour = hourOf(started); }
     a.pending.other_messages++;
     ws.serializeAttachment(a);
     this.duration.begin(started);
     try {
+      if (a.authExpires <= started) { this.send(ws, {type: "session_expired"}); ws.close(1008, "Session expired"); return; }
       if (a.role === "viewer" && typeof message !== "string") { ws.close(1008, "invalid viewer message"); return; }
       let body: unknown;
       try { body = JSON.parse(await decodeMessage(message)); } catch (error) { ws.close(error instanceof Error && error.message === "message_too_large" ? 1009 : 1008, "invalid report encoding"); return; }

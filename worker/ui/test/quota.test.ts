@@ -15,7 +15,7 @@ const requestMock = vi.mocked(request);
 const start = Date.UTC(2026, 0, 1);
 function snapshot(retryAt = Date.now() + 300000): QuotaSnapshot {
   return { source: "local", status: "recorded", day: "2026-01-01", checked_at: Date.now(), retry_at: retryAt, rows: [
-    { id: "do_requests", name: "DO 折算请求", value: 123, limit: 100000, unit: "次", period: "day", scope: "network" },
+    { id: "do_requests", name: "DO 请求（实际）", value: 123, limit: null, unit: "次", period: "day", scope: "network" },
   ] };
 }
 function deferred<T>() {

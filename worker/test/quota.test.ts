@@ -26,18 +26,19 @@ async function resetCounters() {
 }
 afterEach(async () => { for(const client of clients){try{client.close(1000);}catch{}}clients.clear();vi.restoreAllMocks();await reset(); });
 
-it("folds all inbound messages by 20 once, with ordinary requests and alarms at 1:1", () => {
+it("reports raw inbound events, including HTTP, connections and alarms, without a billing conversion", () => {
   const data=localQuota({...emptyCounts(),connections:100,http_requests:900,fast_messages:15000,idle_messages:4900,other_messages:100,alarms:50,viewer_connections:50,handler_ms:90000},12345);
-  expect(value(data,"do_requests")).toBe(2050);
+  expect(value(data,"do_requests")).toBe(21050);
   expect(value(data,"workers")).toBe(1000);
   expect(value(data,"storage")).toBe(12345);
   expect(value(data,"duration")).toBeCloseTo(11.52);
   expect(data.rows.every(row=>row.scope==="network")).toBe(true);
+  expect(data.rows.find(row=>row.id==="do_requests")).toMatchObject({name:"DO 请求（实际）",limit:null});
   expect(data.source).toBe("local");
 });
-it.each([[0,0],[1,1],[19,1],[20,1],[21,2],[20000,1000]])("rounds %s messages only after aggregation", (messages,folded) => {
+it.each([0,1,19,20,21,20000])("counts every one of %s messages as an actual event", messages => {
   const data=localQuota({...emptyCounts(),fast_messages:messages},0);
-  expect(value(data,"do_requests")).toBe(folded);
+  expect(value(data,"do_requests")).toBe(messages);
 });
 
 it("never calls external Analytics, even with legacy credentials and a stale account snapshot", async () => {
@@ -53,6 +54,8 @@ it("never calls external Analytics, even with legacy credentials and a stale acc
 });
 
 it("merges today's persisted and pending counts without flushing or including yesterday or future buckets", async () => {
+  const response=await worker.fetch(new Request(origin+"/panel/api/live",{headers:{Upgrade:"websocket",Origin:origin}}),env);
+  const client=response.webSocket!;clients.add(client);client.accept();
   await resetCounters();
   await runInDurableObject(stub(),(instance,ctx)=>{
     const hour=hourOf(Date.now()),first=Math.floor(hour/24)*24;
@@ -65,7 +68,7 @@ it("merges today's persisted and pending counts without flushing or including ye
   });
   const before=await runInDurableObject(stub(),(_,ctx)=>ctx.storage.sql.exec<{value:string}>("SELECT value FROM config WHERE id=2").one().value);
   const first=await get(),second=await get();
-  expect(value(first,"do_requests")).toBe(2001);expect(value(second,"do_requests")).toBe(2002);
+  expect(value(first,"do_requests")).toBe(21001);expect(value(second,"do_requests")).toBe(21002);
   expect(first.day).toBe(new Date().toISOString().slice(0,10));
   const after=await runInDurableObject(stub(),(_,ctx)=>ctx.storage.sql.exec<{value:string}>("SELECT value FROM config WHERE id=2").one().value);
   expect(after).toBe(before);
@@ -83,13 +86,13 @@ it("preserves uncheckpointed WebSocket usage through hibernation without countin
     attachment.pending={...emptyCounts(),fast_messages:60,idle_messages:100,other_messages:20};
     socket.serializeAttachment(attachment);
   });
-  const folded=(data:QuotaSnapshot)=>value(data,"do_requests")!-value(data,"workers")!;
-  expect(folded(await get())).toBe(11);
+  const messages=(data:QuotaSnapshot)=>value(data,"do_requests")!-value(data,"workers")!;
+  expect(messages(await get())).toBe(220);
   await evictDurableObject(stub());
-  expect(folded(await get())).toBe(11);
+  expect(messages(await get())).toBe(220);
   const state=await worker.fetch(new Request(origin+"/panel/api/state"),env);await state.arrayBuffer();
-  expect(folded(await get())).toBe(11);
-  await evictDurableObject(stub());expect(folded(await get())).toBe(11);
+  expect(messages(await get())).toBe(220);
+  await evictDurableObject(stub());expect(messages(await get())).toBe(220);
 });
 
 it("does not reuse an attachment from a previous persisted epoch", async () => {
@@ -101,7 +104,68 @@ it("does not reuse an attachment from a previous persisted epoch", async () => {
     attachment.epoch=Reflect.get(instance,"runtime").epoch-1;attachment.hour=hour;
     attachment.pending={...emptyCounts(),fast_messages:100};socket.serializeAttachment(attachment);
   });
-  const data=await get();expect(value(data,"do_requests")!-value(data,"workers")!).toBe(5);
+  const data=await get();expect(value(data,"do_requests")!-value(data,"workers")!).toBe(100);
+});
+
+it("retains read-only HTTP requests without a WebSocket through consecutive hibernations", async () => {
+  await resetCounters();
+  for(let request=1;request<=3;request++) {
+    const data=await get();
+    expect(value(data,"workers")).toBe(request);
+    expect(value(data,"do_requests")).toBe(request);
+    await evictDurableObject(stub());
+  }
+});
+
+it("counts rejected upgrades and expired requests once even when no socket can retain counters", async () => {
+  await resetCounters();
+  for(const test of [
+    {path:"/api/live",upgrade:true,expires:Date.now()-1000},
+    {path:"/api/unknown",upgrade:true,expires:Date.now()+60000},
+    {path:"/api/state",upgrade:false,expires:Date.now()-1000},
+  ]) {
+    const response=await stub().fetch(new Request(origin+test.path,{headers:{
+      "X-Monitor-Role":"admin","X-Monitor-Auth-Expires":String(test.expires),
+      ...(test.upgrade?{Upgrade:"websocket"}:{}),
+    }}));
+    expect(response.status).toBe(test.expires<Date.now()?401:404);
+    await response.arrayBuffer();
+    await evictDurableObject(stub());
+  }
+  const data=await get();
+  expect(value(data,"workers")).toBe(4);
+  expect(value(data,"do_requests")).toBe(4);
+});
+
+it("counts a successful WebSocket upgrade exactly once, without an additional HTTP request", async () => {
+  await resetCounters();
+  const response=await worker.fetch(new Request(origin+"/panel/api/live",{headers:{Upgrade:"websocket",Origin:origin}}),env);
+  expect(response.status).toBe(101);
+  const client=response.webSocket!;clients.add(client);client.accept();
+  await evictDurableObject(stub());
+  const data=await get();
+  expect(value(data,"workers")).toBe(2);
+  expect(value(data,"do_requests")).toBe(2);
+});
+
+it("counts application heartbeats and expired-session messages, but not outbound replies", async () => {
+  await resetCounters();
+  const response=await worker.fetch(new Request(origin+"/panel/api/live",{headers:{Upgrade:"websocket",Origin:origin}}),env);
+  const client=response.webSocket!;clients.add(client);client.accept();
+  await runInDurableObject(stub(),async(instance,ctx)=>{
+    await instance.webSocketMessage(ctx.getWebSockets("viewer")[0],JSON.stringify({type:"heartbeat"}));
+  });
+  const before=await get();
+  expect(value(before,"workers")).toBe(2);
+  expect(value(before,"do_requests")).toBe(3);
+  await runInDurableObject(stub(),async(instance,ctx)=>{
+    const socket=ctx.getWebSockets("viewer")[0],attachment=socket.deserializeAttachment();
+    attachment.authExpires=Date.now()-1000;socket.serializeAttachment(attachment);
+    await instance.webSocketMessage(socket,JSON.stringify({type:"heartbeat"}));
+  });
+  const after=await get();
+  expect(value(after,"workers")).toBe(3);
+  expect(value(after,"do_requests")).toBe(5);
 });
 
 it("retains admin authorization for the local usage endpoint", async () => {

@@ -2,14 +2,15 @@ import { emptyQuota, type QuotaSnapshot } from "./quota-model";
 import type { Counts } from "./usage";
 
 // Recorded inbound messages include metrics, hello and application heartbeats.
-// Outbound replies are not in these counters. No extra charge per wakeup.
+// Match Analytics' raw event count, without the billing-only WebSocket ratio.
+// Outbound replies and protocol-level pings are not requests.
 export function localQuota(counts: Counts, storageBytes: number, now = Date.now()): QuotaSnapshot {
   const snapshot = emptyQuota(now);
   const ordinaryRequests = counts.connections + counts.http_requests;
   const messages = counts.fast_messages + counts.idle_messages + counts.other_messages;
   const values: Record<string, number | null> = {
     workers: ordinaryRequests,
-    do_requests: Math.ceil(ordinaryRequests + counts.alarms + messages / 20),
+    do_requests: ordinaryRequests + counts.alarms + messages,
     // Application active wall time × the DO's allocated 128 MB. This remains
     // an estimate: platform overhead and clock granularity are not observable.
     duration: counts.handler_ms / 1000 * 0.128,

@@ -192,7 +192,8 @@ describe("quota forecasting",()=>{
   it("uses measured viewing history for changed intervals and separates frame billing from Worker requests",()=>{
     const c=emptyCounts();Object.assign(c,{view_seconds:3600,device_seconds:20*86400,connections:40,http_requests:60,other_messages:120,alarms:40});
     const f=forecast(DEFAULT_SETTINGS,20,[{hour:0,...c}],86400,4096);
-    expect(f.messages_per_day).toBe(17160);expect(f.do_requests_per_day).toBe(1108);expect(f.worker_requests_per_day).toBe(100);
+    expect(f.messages_per_day).toBe(17160);expect(f.do_requests_per_day).toBe(17524);expect(f.worker_requests_per_day).toBe(100);
+    expect(f.request_basis).toBe("raw_events");
     expect(forecast({...DEFAULT_SETTINGS,active_seconds:10},20,[{hour:0,...c}],86400,4096).messages_per_day).toBe(9960);
     expect(forecast(DEFAULT_SETTINGS,20,[{hour:0,...c}],7*86400,4096).confidence).toBe("long_term");
   });

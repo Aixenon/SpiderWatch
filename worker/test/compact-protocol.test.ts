@@ -55,8 +55,10 @@ it("requires hello before accepting compact metrics and bounds the version heade
   expect(await runInDurableObject(stub(),(_,ctx)=>ctx.storage.sql.exec("SELECT count(*) AS n FROM history_batches").one().n)).toBe(0);
 });
 
-it("does not write SQLite for repeated pending polls or lightweight state reads",async()=>{
+it("keeps repeated pending polls and lightweight reads in a viewer attachment without extra SQLite checkpoints",async()=>{
   await enroll(false);
+  const response=await request("/api/live","GET",undefined,{Upgrade:"websocket"});expect(response.status).toBe(101);
+  const ws=response.webSocket!;clients.add(ws);ws.accept();await receive(ws,"settings");
   const epoch=()=>runInDurableObject(stub(),(_,ctx)=>JSON.parse(ctx.storage.sql.exec<{value:string}>("SELECT value FROM config WHERE id=2").one().value).epoch);
   const before=await epoch();
   for(let i=0;i<8;i++){

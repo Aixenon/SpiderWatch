@@ -94,10 +94,11 @@ it("rejects unsigned, invalidly signed, revoked, oversized and compressed report
   expect((await consume(await signed(device,"/v1/metrics","POST",{}, {"Content-Length":"32769"}))).status).toBe(413);
   expect((await consume(await signed(device,"/v1/metrics","POST",{}, {"Content-Encoding":"gzip"}))).status).toBe(415);
   expect(lookup).not.toHaveBeenCalled();lookup.mockRestore();
-  const persisted=await runInDurableObject(stub(),(_,ctx)=>ctx.storage.sql.exec("SELECT value FROM config WHERE id=2").one().value);
+  const persisted=await runInDurableObject(stub(),(_,ctx)=>ctx.storage.sql.exec("SELECT * FROM nodes WHERE node_id=?",device.id).one());
   const valid=await signed(device,"/v1/metrics","POST",body(device));
   expect((await consume(new Request(valid.url,{method:"POST",headers:valid.headers,body:JSON.stringify(body(device,1,99))}))).status).toBe(401);
-  expect(await runInDurableObject(stub(),(_,ctx)=>ctx.storage.sql.exec("SELECT value FROM config WHERE id=2").one().value)).toBe(persisted);
+  // The failed invocation is metered, but cannot change device state or metrics.
+  expect(await runInDurableObject(stub(),(_,ctx)=>ctx.storage.sql.exec("SELECT * FROM nodes WHERE node_id=?",device.id).one())).toEqual(persisted);
   await admin(`/api/nodes/${device.id}`,"DELETE");expect((await report(device)).status).toBe(403);
 });
 

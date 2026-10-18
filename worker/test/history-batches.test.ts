@@ -7,6 +7,10 @@ import { hash, type Metrics } from "../src/model";
 import { hourOf } from "../src/usage";
 
 const origin="http://127.0.0.1",key="e".repeat(64),host={hostname:"batch-node",os:"linux",arch:"amd64",cpus:2,agent_version:"test"};
+// Keep fake deadlines ahead of the runtime's real clock. A fixed past date
+// lets workerd fire overdue alarms before runDurableObjectAlarm is called.
+const testDay=Math.floor(Date.now()/86400_000)*86400_000+2*86400_000;
+const testTime=(hour:number,minute=0)=>testDay+hour*3600_000+minute*60_000;
 const stub=()=>env.MONITOR.getByName(env.MONITOR_GROUP),nodeID=(index:number)=>index.toString(16).padStart(32,"0"),clients=new Set<WebSocket>();
 type HistoryResponse={points:ResourcePoint[];from:number;to:number;raw_points:number;resolution_seconds:number};
 type Internal={historyWindow:HistoryWindow|null;flushHistory(now:number,force?:boolean):void};
@@ -34,7 +38,7 @@ async function samples() {
 afterEach(async()=>{for(const ws of clients){try{ws.close(1000);}catch{}}clients.clear();vi.restoreAllMocks();await reset();});
 
 it("writes one shared historical batch for fifty asynchronous durable checkpoints and measures SQL costs",async({annotate})=>{
-  const start=Date.parse("2026-10-06T12:00:00Z"),clock=vi.spyOn(Date,"now").mockReturnValue(start);
+  const start=testTime(12),clock=vi.spyOn(Date,"now").mockReturnValue(start);
   await seed(50);await settings(120);for(let i=1;i<=50;i++)await agent(i);
   const evidence=await runInDurableObject(stub(),async(instance,ctx)=>{
     const stale:HistoryBatch={version:1,samples:[[nodeID(1),start-604800_001,120,'{"cpu_percent":1}']]},encoded=encodeHistoryBatch(stale);
@@ -61,7 +65,7 @@ it("writes one shared historical batch for fifty asynchronous durable checkpoint
 });
 
 it("persists a two-hundred-node sixteen-interface batch and serves one node after eviction",async({annotate})=>{
-  const start=Date.parse("2026-10-06T13:00:00Z"),clock=vi.spyOn(Date,"now").mockReturnValue(start);
+  const start=testTime(13),clock=vi.spyOn(Date,"now").mockReturnValue(start);
   await seed(200);await settings(120);
   const window:HistoryWindow={from:start,deadline:start+120_000,interval:120,generation:"max-fleet"};
   await runInDurableObject(stub(),(_,ctx)=>{
@@ -84,7 +88,7 @@ it("persists a two-hundred-node sixteen-interface batch and serves one node afte
 });
 
 it("recovers pending snapshots after disconnect and eviction without overwriting their sample",async()=>{
-  const start=Date.parse("2026-10-06T14:00:00Z"),clock=vi.spyOn(Date,"now").mockReturnValue(start);
+  const start=testTime(14),clock=vi.spyOn(Date,"now").mockReturnValue(start);
   await seed(2);await settings(120);let first=await agent(1),second=await agent(2);
   await send(first,1,1,10);clock.mockReturnValue(start+20_000);await send(second,2,1,20);
   first.close(1000);clock.mockReturnValue(start+30_000);first=await agent(1);await send(first,1,1,99);first.close(1000);
@@ -97,7 +101,7 @@ it("recovers pending snapshots after disconnect and eviction without overwriting
 });
 
 it("closes pending history before changing settings and retains the old recording interval",async()=>{
-  const start=Date.parse("2026-10-06T15:00:00Z"),clock=vi.spyOn(Date,"now").mockReturnValue(start);
+  const start=testTime(15),clock=vi.spyOn(Date,"now").mockReturnValue(start);
   await seed(2);await settings(600);const first=await agent(1),second=await agent(2);
   await send(first,1,1,10);clock.mockReturnValue(start+20_000);await send(second,2,1,20);await settings(120);
   expect((await samples()).map(sample=>sample[2])).toEqual([600,600]);
@@ -110,7 +114,7 @@ it("closes pending history before changing settings and retains the old recordin
 });
 
 it("preserves each receipt time and metering buckets when a history window crosses UTC midnight",async()=>{
-  const midnight=Date.parse("2026-10-07T00:00:00Z"),start=midnight-30_000,clock=vi.spyOn(Date,"now").mockReturnValue(start);
+  const midnight=testDay+86400_000,start=midnight-30_000,clock=vi.spyOn(Date,"now").mockReturnValue(start);
   await seed(2);await settings(120);const first=await agent(1),second=await agent(2);
   await send(first,1,1,10);clock.mockReturnValue(midnight+10_000);await send(second,2,1,20);
   await evictDurableObject(stub());clock.mockReturnValue(start+120_000);expect(await runDurableObjectAlarm(stub())).toBe(true);
@@ -120,7 +124,7 @@ it("preserves each receipt time and metering buckets when a history window cross
 });
 
 it("recovers a reopened window in the same millisecond without mistaking the old batch for its commit",async()=>{
-  const start=Date.parse("2026-10-06T15:30:00Z"),clock=vi.spyOn(Date,"now").mockReturnValue(start);
+  const start=testTime(15,30),clock=vi.spyOn(Date,"now").mockReturnValue(start);
   await seed(2);await settings(600);const first=await agent(1),second=await agent(2);
   await send(first,1,1,10);await settings(120);await send(second,2,1,20);
   expect(await samples()).toHaveLength(1);
@@ -132,7 +136,7 @@ it("recovers a reopened window in the same millisecond without mistaking the old
 });
 
 it("reads only the predecessor and intersecting shared buckets while covering the full seven-day view",async()=>{
-  const end=Date.parse("2026-10-06T16:00:00Z");vi.spyOn(Date,"now").mockReturnValue(end);
+  const end=testTime(16);vi.spyOn(Date,"now").mockReturnValue(end);
   await seed(2);
   await runInDurableObject(stub(),(_,ctx)=>ctx.storage.transactionSync(()=>{
     for(let i=0;i<5040;i++){
@@ -155,7 +159,7 @@ it("reads only the predecessor and intersecting shared buckets while covering th
 });
 
 it("physically removes a deleted node from compressed batches and pending latest while retaining other nodes",async()=>{
-  const start=Date.parse("2026-10-06T17:00:00Z"),clock=vi.spyOn(Date,"now").mockReturnValue(start);
+  const start=testTime(17),clock=vi.spyOn(Date,"now").mockReturnValue(start);
   await seed(2);await settings(120);const first=await agent(1),second=await agent(2);
   await send(first,1,1,10);await send(second,2,1,20);clock.mockReturnValue(start+120_000);await runDurableObjectAlarm(stub());
   await send(first,1,2,30);await send(second,2,2,40);

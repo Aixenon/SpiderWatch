@@ -53,7 +53,7 @@ function value(row: QuotaRow, amount: number | null) { return amount === null ? 
       <div class="panel-heading"><h2 id="quota-heading">实时额度</h2></div>
       <div class="quota-meta"><span>{{ quota?.day || '今日' }} · UTC</span><span v-if="quota?.checked_at">{{ new Date(quota.checked_at).toLocaleTimeString('zh-CN', {hour12:false}) }}</span></div><p v-if="quotaError" class="form-error" role="alert">{{ quotaError }}</p><p v-else-if="!quota" class="muted" role="status">正在读取额度…</p>
       <div class="table-wrap"><table class="quota-table"><thead><tr><th>项目</th><th>已使用</th><th>免费额度</th><th>使用比例</th></tr></thead><tbody>
-        <tr v-for="row in quota?.rows || []" :key="row.id"><td>{{ row.name }}</td><td>{{ value(row, row.value) }}</td><td class="muted">{{ value(row, row.limit) }}{{ row.period === 'day' ? '/日' : '' }}</td><td class="quota-percent"><template v-if="row.value !== null">{{ number(row.value / row.limit * 100, 2) }}%<div class="meter" :class="usageClass(row.value / row.limit * 100)"><span :style="{ width: `${Math.min(100, row.value / row.limit * 100)}%` }"></span></div></template><span v-else class="muted">—</span></td></tr>
+        <tr v-for="row in quota?.rows || []" :key="row.id"><td>{{ row.name }}</td><td>{{ value(row, row.value) }}</td><td class="muted">{{ value(row, row.limit) }}{{ row.limit !== null && row.period === 'day' ? '/日' : '' }}</td><td class="quota-percent"><template v-if="row.value !== null && row.limit !== null">{{ number(row.value / row.limit * 100, 2) }}%<div class="meter" :class="usageClass(row.value / row.limit * 100)"><span :style="{ width: `${Math.min(100, row.value / row.limit * 100)}%` }"></span></div></template><span v-else class="muted">—</span></td></tr>
       </tbody></table></div>
     </section>
   </section>

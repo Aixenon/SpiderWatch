@@ -62,7 +62,9 @@ afterEach(async () => { vi.restoreAllMocks(); await reset(); });
 
 it("serves the deployed revision and streams same-origin assets without GitHub or source-cache writes", async () => {
   const source = bundle(); await setDOEnv();
-  const snapshot = () => runInDurableObject(stub(), (_, ctx) => ctx.storage.sql.exec("SELECT * FROM config ORDER BY id").toArray());
+  // Metering can checkpoint when no WebSocket exists; update metadata itself
+  // must still remain uncached and must not rewrite configuration.
+  const snapshot = () => runInDurableObject(stub(), (_, ctx) => ctx.storage.sql.exec("SELECT * FROM config WHERE id!=2 ORDER BY id").toArray());
   const before = await snapshot();
   expect(await (await check()).json()).toMatchObject({ enabled: true, version: "0.7.1", revision });
   const metadata = await manifest(); expect(metadata.revision).toBe(revision);
